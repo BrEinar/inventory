@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Inventory</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+    label { display: grid; gap: 6px; font-size: 12px; opacity: .9; }
+    input, select, button, textarea {
+      font: inherit; padding: 10px; border: 1px solid rgba(127,127,127,.35);
+      border-radius: 10px; background: transparent;
+    }
+    input[type="number"] { width: 120px; }
+    button { cursor: pointer; }
+    button.primary { border: none; padding: 10px 14px; border-radius: 12px; }
+    .card { border: 1px solid rgba(127,127,127,.25); border-radius: 14px; padding: 12px; margin: 12px 0; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content: space-between; }
+    .toolbar > * { flex: 1 1 auto; }
+    .toolbar .right { display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(127,127,127,.2); vertical-align: top; }
+    th { font-size: 12px; opacity: .8; user-select: none; }
+    .muted { opacity: .75; font-size: 12px; }
+    .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(127,127,127,.3); display:inline-block; }
+    .danger { color: #c00; }
+    .grid { display:grid; gap:10px; }
+    dialog {
+      width: min(680px, 96vw);
+      border: 1px solid rgba(127,127,127,.35);
+      border-radius: 16px;
+      padding: 12px;
+    }
+    dialog::backdrop { background: rgba(0,0,0,.4); }
+    .actions { display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap; margin-top: 10px; }
+    .small { font-size: 12px; }
+    .nowrap { white-space: nowrap; }
+
+    /* scanner */
+    #videoWrap { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid rgba(127,127,127,.25); }
+    video { width: 100%; height: auto; display:block; }
+    .scanBox {
+      position:absolute; inset: 16% 10%;
+      border: 2px solid rgba(255,255,255,.7);
+      border-radius: 18px;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,.25) inset;
+      pointer-events:none;
+    }
+  </style>
+</head>
+<body>
+  <h1>📦 Inventory</h1>
+  <div class="muted">Offline storage on this device. Camera scanning needs opening via http:// (see note below).</div>
+
+  <div class="card">
+    <div class="row">
+      <label>
+        Item name
+        <input id="name" placeholder="e.g., USB-C Cable" autocomplete="off" />
+      </label>
+
+      <label>
+        SKU / Barcode
+        <input id="sku" placeholder="tap Scan to fill" autocomplete="off" />
+      </label>
+
+      <div style="display:flex; gap:10px; align-items:end;">
+        <button id="scanBtn">Scan</button>
+      </div>
+
+      <label>
+        Quantity
+        <input id="qty" type="number" min="0" step="1" value="1" />
+      </label>
+      <label>
+        Location
+        <input id="loc" placeholder="e.g., Drawer A" autocomplete="off" />
+      </label>
+      <label>
+        Min stock
+        <input id="min" type="number" min="0" step="1" value="0" />
+      </label>
+      <label style="flex:1">
+        Notes
+        <input id="notes" placeholder="optional" autocomplete="off" />
+      </label>
+      <button class="primary" id="addBtn">Add / Update</button>
+    </div>
+
+    <div class="muted small" style="margin-top:8px;">
+      Tip: SKU/barcode is the unique ID. Add the same SKU again to update the existing item.
+      <br/>
+      Camera note: open this page via <span class="pill">http://localhost…</span> (Termux method below) so the browser allows camera access.
+    </div>
+  </div>
+
+  <div class="card toolbar">
+    <div class="row" style="width:100%; align-items:center;">
+      <label style="flex: 1;">
+        Search (name/SKU/location/notes)
+        <input id="search" placeholder="type to filter…" />
+      </label>
+
+      <label class="nowrap">
+        Low stock
+        <select id="lowFilter">
+          <option value="all">Show all</option>
+          <option value="low">Only low</option>
+          <option value="ok">Only ok</option>
+        </select>
+      </label>
+
+      <label class="nowrap">
+        Sort
+        <select id="sort">
+          <option value="updated_desc">Recently updated</option>
+          <option value="name_asc">Name A→Z</option>
+          <option value="qty_desc">Qty high→low</option>
+          <option value="qty_asc">Qty low→high</option>
+          <option value="loc_asc">Location A→Z</option>
+        </select>
+      </label>
+
+      <div class="right">
+        <button id="exportJson">Export JSON</button>
+        <button id="exportCsv">Export CSV</button>
+        <button id="importBtn">Import</button>
+        <button class="danger" id="wipe">Wipe</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="stats" class="muted"></div>
+    <div style="overflow:auto; margin-top:10px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th class="nowrap">SKU</th>
+            <th class="nowrap">Qty</th>
+            <th>Location</th>
+            <th class="nowrap">Min</th>
+            <th>Notes</th>
+            <th class="nowrap">Updated</th>
+            <th class="nowrap">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <dialog id="scanDialog">
+    <h3 style="margin:0 0 8px;">Scan barcode</h3>
+    <div class="muted small">Point the camera at a barcode (EAN/UPC/Code128/QR, etc.).</div>
+    <div style="margin-top:10px;" id="videoWrap">
+      <video id="video" muted playsinline></video>
+      <div class="scanBox"></div>
+    </div>
+    <div class="actions">
+      <button id="stopScan">Close</button>
+    </div>
+    <div class="muted small" id="scanStatus" style="margin-top:8px;"></div>
+  </dialog>
+
+  <dialog id="importDialog">
+    <h3 style="margin:0 0 8px;">Import inventory</h3>
+    <div class="muted small">Paste JSON (exported from this app) OR CSV (header row required).</div>
+    <div class="grid" style="margin-top:10px;">
+      <textarea id="importText" rows="10" placeholder="Paste JSON or CSV here"></textarea>
+    </div>
+    <div class="actions">
+      <button id="closeImport">Cancel</button>
+      <button class="primary" id="doImport">Import</button>
+    </div>
+  </dialog>
+
+  <!-- Online scanner library (ZXing) -->
+  <script src="https://unpkg.com/@zxing/library@latest"></script>
+
+<script>
+(() => {
+  const STORAGE_KEY = "inventory_v1";
+  const $ = (id) => document.getElementById(id);
+
+  const els = {
+    name: $("name"),
+    sku: $("sku"),
+    qty: $("qty"),
+    loc: $("loc"),
+    min: $("min"),
+    notes: $("notes"),
+    addBtn: $("addBtn"),
+    scanBtn: $("scanBtn"),
+
+    search: $("search"),
+    lowFilter: $("lowFilter"),
+    sort: $("sort"),
+    rows: $("rows"),
+    stats: $("stats"),
+
+    exportJson: $("exportJson"),
+    exportCsv: $("exportCsv"),
+    importBtn: $("importBtn"),
+    wipe: $("wipe"),
+
+    importDialog: $("importDialog"),
+    importText: $("importText"),
+    closeImport: $("closeImport"),
+    doImport: $("doImport"),
+
+    scanDialog: $("scanDialog"),
+    video: $("video"),
+    stopScan: $("stopScan"),
+    scanStatus: $("scanStatus"),
+  };
+
+  let items = load();
+
+  function nowISO() { return new Date().toISOString(); }
+  function clampInt(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.round(n));
+  }
+  function normalizeItem(x) {
+    if (!x) return null;
+    return {
+      id: String(x.id ?? crypto.randomUUID()),
+      name: String(x.name ?? "").trim(),
+      sku: String(x.sku ?? "").trim(),
+      qty: clampInt(x.qty ?? 0),
+      loc: String(x.loc ?? "").trim(),
+      min: clampInt(x.min ?? 0),
+      notes: String(x.notes ?? "").trim(),
+      updatedAt: String(x.updatedAt ?? nowISO()),
+    };
+  }
+  function load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map(normalizeItem).filter(Boolean);
+    } catch { return []; }
+  }
+  function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); }
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
+  }
+  function fmtDate(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString();
+  }
+
+  function getFilteredSorted() {
+    const q = els.search.value.trim().toLowerCase();
+    const lowMode = els.lowFilter.value;
+    let out = items.slice();
+
+    if (q) {
+      out = out.filter(it => {
+        const hay = `${it.name} ${it.sku} ${it.loc} ${it.notes}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    if (lowMode !== "all") {
+      out = out.filter(it => {
+        const low = it.qty <= it.min;
+        return lowMode === "low" ? low : !low;
+      });
+    }
+
+    const mode = els.sort.value;
+    const cmp = {
+      updated_desc: (a,b) => (b.updatedAt.localeCompare(a.updatedAt)),
+      name_asc: (a,b) => a.name.localeCompare(b.name),
+      qty_desc: (a,b) => b.qty - a.qty || a.name.localeCompare(b.name),
+      qty_asc: (a,b) => a.qty - b.qty || a.name.localeCompare(b.name),
+      loc_asc: (a,b) => a.loc.localeCompare(b.loc) || a.name.localeCompare(b.name),
+    }[mode] || ((a,b) => b.updatedAt.localeCompare(a.updatedAt));
+
+    out.sort(cmp);
+    return out;
+  }
+
+  function render() {
+    const view = getFilteredSorted();
+    const lowCount = view.filter(it => it.qty <= it.min).length;
+    els.stats.textContent =
+      `Items: ${view.length}  •  Low stock: ${lowCount}  •  Total unique SKUs: ${new Set(view.map(i => i.sku).filter(Boolean)).size}`;
+
+    els.rows.innerHTML = "";
+    for (const it of view) {
+      const low = it.qty <= it.min;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(it.name || "(unnamed)")}</strong> ${low ? `<span class="pill">LOW</span>` : ""}</td>
+        <td class="nowrap">${escapeHtml(it.sku)}</td>
+        <td class="nowrap">${it.qty}</td>
+        <td>${escapeHtml(it.loc)}</td>
+        <td class="nowrap">${it.min}</td>
+        <td>${escapeHtml(it.notes)}</td>
+        <td class="muted nowrap">${escapeHtml(fmtDate(it.updatedAt))}</td>
+        <td class="nowrap">
+          <button data-act="edit" data-id="${it.id}">Edit</button>
+          <button data-act="plus" data-id="${it.id}">+1</button>
+          <button data-act="minus" data-id="${it.id}">-1</button>
+          <button class="danger" data-act="del" data-id="${it.id}">Delete</button>
+        </td>
+      `;
+      els.rows.appendChild(tr);
+    }
+    save();
+  }
+
+  function upsertFromForm() {
+    const name = els.name.value.trim();
+    const sku = els.sku.value.trim();
+    const qty = clampInt(els.qty.value);
+    const loc = els.loc.value.trim();
+    const min = clampInt(els.min.value);
+    const notes = els.notes.value.trim();
+
+    if (!name && !sku) { alert("Add at least a name or SKU."); return; }
+
+    let it = sku ? items.find(x => x.sku.toLowerCase() === sku.toLowerCase()) : null;
+
+    if (!it) {
+      it = normalizeItem({ id: crypto.randomUUID(), name, sku, qty, loc, min, notes, updatedAt: nowISO() });
+      items.push(it);
+    } else {
+      it.name = name || it.name;
+      it.qty = qty;
+      it.loc = loc;
+      it.min = min;
+      it.notes = notes;
+      it.updatedAt = nowISO();
+    }
+
+    els.name.value = "";
+    els.sku.value = "";
+    els.qty.value = "1";
+    els.loc.value = "";
+    els.min.value = "0";
+    els.notes.value = "";
+    els.name.focus();
+
+    render();
+  }
+
+  function editToForm(id) {
+    const it = items.find(x => x.id === id);
+    if (!it) return;
+    els.name.value = it.name;
+    els.sku.value = it.sku;
+    els.qty.value = String(it.qty);
+    els.loc.value = it.loc;
+    els.min.value = String(it.min);
+    els.notes.value = it.notes;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    els.name.focus();
+  }
+
+  function adjustQty(id, delta) {
+    const it = items.find(x => x.id === id);
+    if (!it) return;
+    it.qty = clampInt(it.qty + delta);
+    it.updatedAt = nowISO();
+    render();
+  }
+
+  function delItem(id) {
+    const it = items.find(x => x.id === id);
+    if (!it) return;
+    if (!confirm(`Delete "${it.name || it.sku || "item"}"?`)) return;
+    items = items.filter(x => x.id !== id);
+    render();
+  }
+
+  function download(filename, text, mime="text/plain") {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportJSON() {
+    const payload = { version: 1, exportedAt: nowISO(), items };
+    download(`inventory-backup-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(payload, null, 2), "application/json");
+  }
+
+  function toCSVRow(values) {
+    return values.map(v => {
+      const s = String(v ?? "");
+      const needs = /[,"\n]/.test(s);
+      return needs ? `"${s.replace(/"/g, '""')}"` : s;
+    }).join(",");
+  }
+
+  function exportCSV() {
+    const header = ["name","sku","qty","loc","min","notes","updatedAt"];
+    const lines = [toCSVRow(header)];
+    for (const it of items) {
+      lines.push(toCSVRow([it.name, it.sku, it.qty, it.loc, it.min, it.notes, it.updatedAt]));
+    }
+    download(`inventory-${new Date().toISOString().slice(0,10)}.csv`, lines.join("\n"), "text/csv");
+  }
+
+  function parseCSV(text) {
+    const rows = [];
+    let i = 0, field = "", row = [], inQuotes = false;
+
+    while (i < text.length) {
+      const c = text[i];
+
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i+1] === '"') { field += '"'; i += 2; continue; }
+          inQuotes = false; i++; continue;
+        }
+        field += c; i++; continue;
+      } else {
+        if (c === '"') { inQuotes = true; i++; continue; }
+        if (c === ",") { row.push(field); field = ""; i++; continue; }
+        if (c === "\n") { row.push(field); rows.push(row); field = ""; row = []; i++; continue; }
+        if (c === "\r") { i++; continue; }
+        field += c; i++; continue;
+      }
+    }
+    row.push(field);
+    rows.push(row);
+    return rows.filter(r => r.some(x => String(x).trim() !== ""));
+  }
+
+  function importData(text) {
+    const t = text.trim();
+    if (!t) return;
+
+    try {
+      const obj = JSON.parse(t);
+      let incoming = null;
+      if (Array.isArray(obj)) incoming = obj;
+      else if (obj && Array.isArray(obj.items)) incoming = obj.items;
+
+      if (incoming) {
+        const normalized = incoming.map(normalizeItem).filter(Boolean);
+        for (const it of normalized) {
+          if (it.sku) {
+            const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase());
+            if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; }
+          }
+          it.updatedAt = nowISO();
+          items.push(it);
+        }
+        render();
+        return { ok: true, msg: `Imported ${normalized.length} item(s) from JSON.` };
+      }
+    } catch {}
+
+    const rows = parseCSV(t);
+    if (rows.length < 2) return { ok: false, msg: "CSV needs a header row and at least one data row." };
+
+    const header = rows[0].map(h => String(h).trim().toLowerCase());
+    const idx = (key) => header.indexOf(key);
+
+    const imported = [];
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      const it = normalizeItem({
+        id: crypto.randomUUID(),
+        name: row[idx("name")] ?? "",
+        sku: row[idx("sku")] ?? "",
+        qty: row[idx("qty")] ?? 0,
+        loc: row[idx("loc")] ?? "",
+        min: row[idx("min")] ?? 0,
+        notes: row[idx("notes")] ?? "",
+        updatedAt: row[idx("updatedat")] ?? nowISO(),
+      });
+      if (!it.name && !it.sku) continue;
+      imported.push(it);
+    }
+
+    for (const it of imported) {
+      if (it.sku) {
+        const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase());
+        if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; }
+      }
+      it.updatedAt = nowISO();
+      items.push(it);
+    }
+    render();
+    return { ok: true, msg: `Imported ${imported.length} item(s) from CSV.` };
+  }
+
+  // --- Barcode scanning (ZXing) ---
+  let codeReader = null;
+  let stopScanFn = null;
+
+  async function startScan() {
+    // Camera requires secure context. localhost over http is allowed in Chrome.
+    if (!window.isSecureContext) {
+      alert("Camera access is blocked because this page isn't opened in a secure context.\n\nUse Termux: python -m http.server then open http://localhost:8000/inventory.html");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      alert("Camera API not available in this browser.");
+      return;
+    }
+    if (!window.ZXing) {
+      alert("Scanner library failed to load (need internet).");
+      return;
+    }
+
+    els.scanStatus.textContent = "Starting camera…";
+    els.scanDialog.showModal();
+
+    codeReader = new ZXing.BrowserMultiFormatReader();
+    try {
+      // Prefer rear camera if available
+      const constraints = { video: { facing
