@@ -687,12 +687,76 @@
   let codeReader = null;
   function openDialog(el){ if (typeof el.showModal === "function") el.showModal(); else el.setAttribute("open",""); }
   function closeDialog(el){ if (typeof el.close === "function") el.close(); else el.removeAttribute("open"); }
-  async function fetchProductNameByBarcode(barcode) { const code = String(barcode ?? "").trim(); if (!code) return ""; const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 4500); try { const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`, { signal: controller.signal }); if (!res.ok) return ""; const data = await res.json(); return String(data?.product?.product_name || data?.product?.product_name_en || "").trim(); } catch { return ""; } finally { clearTimeout(timer); } }
-  async function autoFillNameFromBarcode(barcode){ const foundName = await fetchProductNameByBarcode(barcode); if (els.sku.value.trim() !== barcode) return; if (foundName) { if (!els.name.value.trim()) els.name.value = foundName; els.scanStatus.textContent = `Scanned: ${barcode} (name found online)`; els.qty.focus(); return; } els.scanStatus.textContent = `Scanned: ${barcode} (no product name found online)`; els.name.focus(); }
+  function parseMeasureText(rawText) {
+    const text = String(rawText ?? "").trim().toLowerCase();
+    if (!text) return null;
+    const m = text.match(/(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml)\b/);
+    if (!m) return null;
+    const numeric = Number(m[1].replace(",", "."));
+    if (!Number.isFinite(numeric) || numeric <= 0) return null;
+    return { unitValue: numeric, unitType: m[2] };
+  }
+  function parseMeasureFromGs1Barcode(rawBarcode) {
+    const raw = String(rawBarcode ?? "").trim();
+    if (!raw) return null;
+    const cleaned = raw.replace(/[()\s]/g, "");
+    const aiMatch = cleaned.match(/(?:310|315|320|316)(\d)(\d{6})/);
+    if (!aiMatch) return null;
+    const aiPrefix = cleaned.slice(aiMatch.index, aiMatch.index + 3);
+    const decimals = Number(aiMatch[1]);
+    const digits = Number(aiMatch[2]);
+    if (!Number.isInteger(decimals) || !Number.isFinite(digits)) return null;
+    const unitValue = digits / (10 ** decimals);
+    const unitType = (aiPrefix === "310" || aiPrefix === "320") ? "kg" : "l";
+    if (!Number.isFinite(unitValue) || unitValue <= 0) return null;
+    return { unitValue, unitType };
+  }
+  function fillUnitFromMeasure(measure) {
+    if (!measure) return false;
+    if (clampFloat(els.unitValue.value) > 0 && els.unitType.value) return false;
+    els.unitValue.value = String(measure.unitValue);
+    els.unitType.value = measure.unitType;
+    return true;
+  }
+  async function fetchProductByBarcode(barcode) {
+    const code = String(barcode ?? "").trim();
+    if (!code) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    try {
+      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`, { signal: controller.signal });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const product = data?.product || null;
+      if (!product) return null;
+      return {
+        name: String(product.product_name || product.product_name_en || "").trim(),
+        measure: parseMeasureText(product.quantity),
+      };
+    } catch {
+      return null;
+    } finally { clearTimeout(timer); }
+  }
+  async function autoFillFromBarcode(barcode) {
+    const product = await fetchProductByBarcode(barcode);
+    if (els.sku.value.trim() !== barcode) return;
+    if (product?.name && !els.name.value.trim()) els.name.value = product.name;
+    const filledMeasure = fillUnitFromMeasure(product?.measure);
+    if (product?.name || filledMeasure) {
+      const parts = [];
+      if (product?.name) parts.push("name");
+      if (filledMeasure) parts.push("measure");
+      els.scanStatus.textContent = `Scanned: ${barcode} (${parts.join(" + ")} found online)`;
+      els.qty.focus();
+      return;
+    }
+    els.scanStatus.textContent = `Scanned: ${barcode} (no product details found online)`;
+    els.name.focus();
+  }
   function parseBestBeforeFromScan(text) { const raw = String(text ?? "").trim(); if (!raw) return ""; if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw; const dmyOrMdy = raw.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})\b/); if (dmyOrMdy) { let a = Number(dmyOrMdy[1]); let b = Number(dmyOrMdy[2]); let y = Number(dmyOrMdy[3]); if (y < 100) y += 2000; const day = a > 12 ? a : b; const month = a > 12 ? b : a; return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`; } const ymd = raw.match(/\b(\d{4})(\d{2})(\d{2})\b/); if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`; return ""; }
   async function startScan(mode = "sku") { if (!window.isSecureContext) { alert("Camera access is blocked because this page isn't opened in a secure context."); return; } if (!navigator.mediaDevices?.getUserMedia) { alert("Camera API not available in this browser."); return; } if (!window.ZXing) { alert("Scanner library failed to load (need internet)."); return; }
     els.scanStatus.textContent = "Starting camera…"; openDialog(els.scanDialog); codeReader = new ZXing.BrowserMultiFormatReader();
-    try { const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false }; await codeReader.decodeFromConstraints(constraints, els.video, (result, err) => { if (result?.text) { const value = result.text.trim(); stopScan(); if (mode === "bestBefore") { const parsedDate = parseBestBeforeFromScan(value); if (parsedDate) { els.bestBefore.value = parsedDate; els.scanStatus.textContent = `Scanned best before date: ${parsedDate}`; } else { els.scanStatus.textContent = `Scanned text did not look like a date: ${value}`; } els.bestBefore.focus(); } else { els.sku.value = value; const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase()); if (existing?.name) { els.name.value = existing.name; els.scanStatus.textContent = `Scanned: ${value} (name auto-filled from inventory)`; els.qty.focus(); } else { els.scanStatus.textContent = `Scanned: ${value}. Looking up name online…`; autoFillNameFromBarcode(value); } } return; }
+    try { const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false }; await codeReader.decodeFromConstraints(constraints, els.video, (result, err) => { if (result?.text) { const value = result.text.trim(); stopScan(); if (mode === "bestBefore") { const parsedDate = parseBestBeforeFromScan(value); if (parsedDate) { els.bestBefore.value = parsedDate; els.scanStatus.textContent = `Scanned best before date: ${parsedDate}`; } else { els.scanStatus.textContent = `Scanned text did not look like a date: ${value}`; } els.bestBefore.focus(); } else { els.sku.value = value; const parsedMeasure = parseMeasureFromGs1Barcode(value); const filledFromScan = fillUnitFromMeasure(parsedMeasure); const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase()); if (existing?.name) { els.name.value = existing.name; els.scanStatus.textContent = `Scanned: ${value} (${filledFromScan ? "name + measure" : "name"} auto-filled from inventory)`; els.qty.focus(); } else { els.scanStatus.textContent = `Scanned: ${value}${filledFromScan ? " (measure found in barcode)." : "."} Looking up details online…`; autoFillFromBarcode(value); } } return; }
       if (!err) return; if (err.name === "NotFoundException") { els.scanStatus.textContent = "Scanning…"; return; } els.scanStatus.textContent = `Scanner error: ${err.message || err.name || "Unknown error"}`; }); } catch (e) { els.scanStatus.textContent = `Could not start camera: ${e?.message || e}`; } }
   function stopScan() { try { codeReader?.reset(); } catch {} codeReader = null; try { const stream = els.video.srcObject; if (stream) stream.getTracks().forEach(t => t.stop()); els.video.srcObject = null; } catch {} closeDialog(els.scanDialog); }
 
