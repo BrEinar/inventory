@@ -175,6 +175,20 @@
         <input id="qty" type="number" min="0" step="1" value="1" />
       </label>
       <label>
+        Per-unit amount
+        <input id="unitValue" type="number" min="0" step="0.01" value="0" />
+      </label>
+      <label>
+        Unit
+        <select id="unitType">
+          <option value="">—</option>
+          <option value="g">g</option>
+          <option value="kg">kg</option>
+          <option value="ml">ml</option>
+          <option value="l">l</option>
+        </select>
+      </label>
+      <label>
         Best before
         <input id="bestBefore" type="date" />
       </label>
@@ -243,6 +257,7 @@
             <th>Name</th>
             <th class="nowrap">SKU</th>
             <th class="nowrap">Qty</th>
+            <th class="nowrap">Unit / Total</th>
             <th>Location</th>
             <th class="nowrap">Min</th>
             <th class="nowrap">Best before</th>
@@ -320,6 +335,8 @@
     name: $("name"),
     sku: $("sku"),
     qty: $("qty"),
+    unitValue: $("unitValue"),
+    unitType: $("unitType"),
     loc: $("loc"),
     min: $("min"),
     notes: $("notes"),
@@ -368,6 +385,11 @@
     if (!Number.isFinite(n)) return 0;
     return Math.max(0, Math.round(n));
   }
+  function clampFloat(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, n);
+  }
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   }
@@ -394,6 +416,8 @@
       name: String(x.name ?? "").trim(),
       sku: String(x.sku ?? "").trim(),
       qty,
+      unitValue: clampFloat(x.unitValue ?? 0),
+      unitType: ["g", "kg", "ml", "l"].includes(String(x.unitType ?? "").toLowerCase()) ? String(x.unitType).toLowerCase() : "",
       loc: String(x.loc ?? "").trim(),
       min: clampInt(x.min ?? 0),
       bestBeforeDates,
@@ -545,6 +569,19 @@
     if (!withDates.length) return `0/${it.qty} dated`;
     return `${withDates[0]} (${withDates.length}/${it.qty} dated)`;
   }
+  function formatMeasure(value, unit) {
+    if (!unit || !Number.isFinite(value) || value <= 0) return "—";
+    const fixed = (n) => Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.00$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+    if (unit === "g" && value >= 1000) return `${fixed(value / 1000)}kg`;
+    if (unit === "ml" && value >= 1000) return `${fixed(value / 1000)}l`;
+    return `${fixed(value)}${unit}`;
+  }
+  function formatUnitAndTotal(it) {
+    if (!it.unitType || it.unitValue <= 0) return "—";
+    const each = formatMeasure(it.unitValue, it.unitType);
+    const total = formatMeasure(it.unitValue * it.qty, it.unitType);
+    return `${each} each • ${total} total`;
+  }
 
   function getFilteredSorted() {
     const q = els.search.value.trim().toLowerCase();
@@ -576,6 +613,7 @@
         <td data-label="Name"><strong>${escapeHtml(it.name || "(unnamed)")}</strong> ${low ? `<span class="pill">LOW</span>` : ""}</td>
         <td class="nowrap" data-label="SKU">${escapeHtml(it.sku)}</td>
         <td class="nowrap" data-label="Qty">${it.qty}</td>
+        <td class="nowrap" data-label="Unit / Total">${escapeHtml(formatUnitAndTotal(it))}</td>
         <td data-label="Location">${escapeHtml(it.loc)}</td>
         <td class="nowrap" data-label="Min">${it.min}</td>
         <td class="nowrap" data-label="Best before">${escapeHtml(formatBestBeforeSummary(it))}</td>
@@ -597,6 +635,8 @@
     const name = els.name.value.trim();
     const sku = els.sku.value.trim();
     const qty = clampInt(els.qty.value);
+    const unitValue = clampFloat(els.unitValue.value);
+    const unitType = String(els.unitType.value || "").trim().toLowerCase();
     const bestBefore = els.bestBefore.value;
     const loc = els.loc.value.trim();
     const min = clampInt(els.min.value);
@@ -604,7 +644,7 @@
     if (!name && !sku) { alert("Add at least a name or SKU."); return; }
     let it = sku ? items.find(x => x.sku.toLowerCase() === sku.toLowerCase()) : null;
     if (!it) {
-      it = normalizeItem({ id: crypto.randomUUID(), name, sku, qty, loc, min, notes, bestBeforeDates: makeBestBeforeDates(qty, bestBefore), updatedAt: nowISO() });
+      it = normalizeItem({ id: crypto.randomUUID(), name, sku, qty, unitValue, unitType, loc, min, notes, bestBeforeDates: makeBestBeforeDates(qty, bestBefore), updatedAt: nowISO() });
       items.push(it);
     } else {
       const previousQty = it.qty;
@@ -617,15 +657,17 @@
         it.qty = clampInt(it.qty + qty);
         it.bestBeforeDates = appendBestBeforeDates(it.bestBeforeDates, previousQty, qty, bestBefore);
       }
+      it.unitValue = unitValue;
+      it.unitType = ["g", "kg", "ml", "l"].includes(unitType) ? unitType : "";
       it.loc = loc; it.min = min; it.notes = notes; it.updatedAt = nowISO();
     }
     editingId = null;
-    els.name.value = ""; els.sku.value = ""; els.qty.value = "1"; els.loc.value = ""; els.min.value = "0"; els.bestBefore.value = ""; els.notes.value = "";
+    els.name.value = ""; els.sku.value = ""; els.qty.value = "1"; els.unitValue.value = "0"; els.unitType.value = ""; els.loc.value = ""; els.min.value = "0"; els.bestBefore.value = ""; els.notes.value = "";
     els.name.focus();
     render();
   }
 
-  function editToForm(id) { const it = items.find(x => x.id === id); if (!it) return; editingId = id; els.name.value = it.name; els.sku.value = it.sku; els.qty.value = String(it.qty); els.loc.value = it.loc; els.min.value = String(it.min); els.bestBefore.value = it.bestBeforeDates.find(Boolean) || ""; els.notes.value = it.notes; window.scrollTo({ top: 0, behavior: "smooth" }); els.name.focus(); }
+  function editToForm(id) { const it = items.find(x => x.id === id); if (!it) return; editingId = id; els.name.value = it.name; els.sku.value = it.sku; els.qty.value = String(it.qty); els.unitValue.value = String(it.unitValue || 0); els.unitType.value = it.unitType || ""; els.loc.value = it.loc; els.min.value = String(it.min); els.bestBefore.value = it.bestBeforeDates.find(Boolean) || ""; els.notes.value = it.notes; window.scrollTo({ top: 0, behavior: "smooth" }); els.name.focus(); }
   function adjustQty(id, delta) { const it = items.find(x => x.id === id); if (!it) return; it.qty = clampInt(it.qty + delta); it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, it.qty, ""); it.updatedAt = nowISO(); render(); }
   function editBestBeforeDates(id) { const it = items.find(x => x.id === id); if (!it) return; editingBestBeforeId = id; els.bestBeforeMeta.textContent = `${it.name || "(unnamed)"} • Qty: ${it.qty}`; els.bestBeforeInputs.innerHTML = ""; for (let i = 0; i < it.qty; i++) { const row = document.createElement("label"); row.innerHTML = `Unit ${i + 1}<input type="date" data-best-before-index="${i}" value="${escapeHtml(it.bestBeforeDates?.[i] || "")}" />`; els.bestBeforeInputs.appendChild(row);} openDialog(els.bestBeforeDialog); }
   function saveBestBeforeDates() { const it = items.find(x => x.id === editingBestBeforeId); if (!it) return; const inputs = [...els.bestBeforeInputs.querySelectorAll("input[data-best-before-index]")]; it.bestBeforeDates = inputs.sort((a,b)=>Number(a.dataset.bestBeforeIndex)-Number(b.dataset.bestBeforeIndex)).map(input => String(input.value || "").trim()); it.updatedAt = nowISO(); editingBestBeforeId = null; closeDialog(els.bestBeforeDialog); render(); }
@@ -634,13 +676,13 @@
   function download(filename, text, mime="text/plain") { const blob = new Blob([text], { type: mime }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
   function exportJSON() { const payload = { version: 1, exportedAt: nowISO(), items }; download(`inventory-backup-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(payload, null, 2), "application/json"); }
   function toCSVRow(values) { return values.map(v => { const s = String(v ?? ""); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(","); }
-  function exportCSV() { const header = ["name","sku","qty","loc","min","bestBeforeDates","notes","updatedAt"]; const lines = [toCSVRow(header)]; for (const it of items) lines.push(toCSVRow([it.name, it.sku, it.qty, it.loc, it.min, (it.bestBeforeDates || []).join("|"), it.notes, it.updatedAt])); download(`inventory-${new Date().toISOString().slice(0,10)}.csv`, lines.join("\n"), "text/csv"); }
+  function exportCSV() { const header = ["name","sku","qty","unitValue","unitType","loc","min","bestBeforeDates","notes","updatedAt"]; const lines = [toCSVRow(header)]; for (const it of items) lines.push(toCSVRow([it.name, it.sku, it.qty, it.unitValue ?? 0, it.unitType ?? "", it.loc, it.min, (it.bestBeforeDates || []).join("|"), it.notes, it.updatedAt])); download(`inventory-${new Date().toISOString().slice(0,10)}.csv`, lines.join("\n"), "text/csv"); }
 
   function parseCSV(text) { const rows=[]; let i=0,field="",row=[],inQuotes=false; while(i<text.length){const c=text[i]; if(inQuotes){ if(c==='"'){ if(text[i+1]==='"'){field+='"';i+=2;continue;} inQuotes=false;i++;continue;} field+=c;i++;continue; } else { if(c==='"'){inQuotes=true;i++;continue;} if(c===","){row.push(field);field="";i++;continue;} if(c==="\n"){row.push(field);rows.push(row);field="";row=[];i++;continue;} if(c==="\r"){i++;continue;} field+=c;i++;continue; } } row.push(field); rows.push(row); return rows.filter(r=>r.some(x=>String(x).trim()!=="")); }
 
   function importData(text) { const t = text.trim(); if (!t) return; try { const obj = JSON.parse(t); let incoming = null; if (Array.isArray(obj)) incoming = obj; else if (obj && Array.isArray(obj.items)) incoming = obj.items; if (incoming) { const normalized = incoming.map(normalizeItem).filter(Boolean); for (const it of normalized) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it); } render(); return { ok: true, msg: `Imported ${normalized.length} item(s) from JSON.` }; } } catch {}
     const rows = parseCSV(t); if (rows.length < 2) return { ok:false, msg:"CSV needs a header row and at least one data row." }; const header = rows[0].map(h => String(h).trim().toLowerCase()); const idx = (key)=>header.indexOf(key); const imported=[];
-    for (let r=1; r<rows.length; r++) { const row = rows[r]; const it = normalizeItem({ id: crypto.randomUUID(), name: row[idx("name")] ?? "", sku: row[idx("sku")] ?? "", qty: row[idx("qty")] ?? 0, loc: row[idx("loc")] ?? "", min: row[idx("min")] ?? 0, bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x=>x.trim()).filter(Boolean), notes: row[idx("notes")] ?? "", updatedAt: row[idx("updatedat")] ?? nowISO() }); if (!it.name && !it.sku) continue; imported.push(it);} for (const it of imported) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it);} render(); return { ok:true, msg:`Imported ${imported.length} item(s) from CSV.`}; }
+    for (let r=1; r<rows.length; r++) { const row = rows[r]; const it = normalizeItem({ id: crypto.randomUUID(), name: row[idx("name")] ?? "", sku: row[idx("sku")] ?? "", qty: row[idx("qty")] ?? 0, unitValue: row[idx("unitvalue")] ?? 0, unitType: row[idx("unittype")] ?? "", loc: row[idx("loc")] ?? "", min: row[idx("min")] ?? 0, bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x=>x.trim()).filter(Boolean), notes: row[idx("notes")] ?? "", updatedAt: row[idx("updatedat")] ?? nowISO() }); if (!it.name && !it.sku) continue; imported.push(it);} for (const it of imported) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it);} render(); return { ok:true, msg:`Imported ${imported.length} item(s) from CSV.`}; }
 
   let codeReader = null;
   function openDialog(el){ if (typeof el.showModal === "function") el.showModal(); else el.setAttribute("open",""); }
@@ -662,7 +704,7 @@
   [els.signupPass, els.signupPass2, els.signupUser].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") signup().catch(() => setAuthStatus("Could not create account.", true)); }));
 
   els.addBtn.addEventListener("click", upsertFromForm);
-  [els.name, els.sku, els.qty, els.loc, els.min, els.notes].forEach((input) => input.addEventListener("keydown", (e) => { if (e.key === "Enter") upsertFromForm(); }));
+  [els.name, els.sku, els.qty, els.unitValue, els.unitType, els.loc, els.min, els.notes].forEach((input) => input.addEventListener("keydown", (e) => { if (e.key === "Enter") upsertFromForm(); }));
   els.scanBtn.addEventListener("click", () => startScan("sku"));
   els.scanBestBeforeBtn.addEventListener("click", () => startScan("bestBefore"));
   els.stopScan.addEventListener("click", stopScan);
