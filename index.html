@@ -471,6 +471,10 @@
     while (out.length < clampInt(qty)) out.push(cleanDate);
     return out;
   }
+  function appendBestBeforeDates(existingDates, existingQty, addQty, dateValue = "") {
+    const preserved = resizeBestBeforeDates(existingDates, existingQty, "");
+    return preserved.concat(makeBestBeforeDates(addQty, dateValue));
+  }
   function formatBestBeforeSummary(it) {
     const withDates = (it.bestBeforeDates || []).filter(Boolean).sort();
     if (!it.qty) return "—";
@@ -539,6 +543,7 @@
       it = normalizeItem({ id: crypto.randomUUID(), name, sku, qty, loc, min, notes, bestBeforeDates: makeBestBeforeDates(qty, bestBefore), updatedAt: nowISO() });
       items.push(it);
     } else {
+      const previousQty = it.qty;
       const isEditingThisItem = editingId && editingId === it.id;
       it.name = name || it.name;
       if (isEditingThisItem) {
@@ -546,7 +551,7 @@
         it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, qty, bestBefore);
       } else {
         it.qty = clampInt(it.qty + qty);
-        it.bestBeforeDates = (it.bestBeforeDates || []).concat(makeBestBeforeDates(qty, bestBefore));
+        it.bestBeforeDates = appendBestBeforeDates(it.bestBeforeDates, previousQty, qty, bestBefore);
       }
       it.loc = loc; it.min = min; it.notes = notes; it.updatedAt = nowISO();
     }
