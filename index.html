@@ -255,6 +255,7 @@
         <button id="exportJson">Export JSON</button>
         <button id="exportCsv">Export CSV</button>
         <button id="importBtn">Import</button>
+        <button id="logoutBtn">Logout</button>
         <button class="danger" id="wipe">Wipe</button>
       </div>
     </div>
@@ -381,6 +382,7 @@
   </dialog>
 
   <script src="https://unpkg.com/@zxing/library@latest"></script>
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 
 <script>
 (() => {
@@ -388,6 +390,8 @@
   const AUTH_KEY = "inventory_auth_v1";
   const AUTH_USERS_KEY = "inventory_auth_users_v2";
   const ENC_KEY_PREFIX = "inventory_encrypted_v1_";
+  const CLOUD_CACHE_PREFIX = "inventory_cloud_cache_v1_";
+  const SUPABASE_CONFIG_KEY = "inventory_supabase_config_v1";
   const PBKDF2_ITERATIONS = 210000;
   const $ = (id) => document.getElementById(id);
 
@@ -430,6 +434,7 @@
     exportCsv: $("exportCsv"),
     importBtn: $("importBtn"),
     wipe: $("wipe"),
+    logoutBtn: $("logoutBtn"),
 
     importDialog: $("importDialog"),
     importText: $("importText"),
@@ -479,6 +484,32 @@
   let recipes = [];
   let mealPlan = { start: "", days: 7, entries: [] };
   let activeTab = "inventory";
+  let supabaseClient = null;
+  let usingCloudAuth = false;
+
+  function getCloudConfig() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SUPABASE_CONFIG_KEY) || "null");
+      if (!parsed?.url || !parsed?.anonKey) return null;
+      return { url: String(parsed.url), anonKey: String(parsed.anonKey) };
+    } catch {
+      return null;
+    }
+  }
+
+  function getCloudCacheKey() {
+    return `${CLOUD_CACHE_PREFIX}${currentUser || "anonymous"}`;
+  }
+
+  function initCloudAuthClient() {
+    const cfg = getCloudConfig();
+    if (!cfg || !window.supabase?.createClient) return null;
+    try {
+      return window.supabase.createClient(cfg.url, cfg.anonKey);
+    } catch {
+      return null;
+    }
+  }
 
   function setAppTab(tab) {
     activeTab = ["inventory", "recipes", "planning"].includes(tab) ? tab : "inventory";
@@ -620,7 +651,13 @@
   }
 
   async function save() {
-    if (!sessionKey || !currentUser) return;
+    if (!currentUser) return;
+    if (usingCloudAuth) {
+      const payload = { version: 2, items, recipes, mealPlan };
+      localStorage.setItem(getCloudCacheKey(), JSON.stringify(payload));
+      return;
+    }
+    if (!sessionKey) return;
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const payload = { version: 2, items, recipes, mealPlan };
     const plain = new TextEncoder().encode(JSON.stringify(payload));
@@ -629,6 +666,20 @@
   }
 
   async function load() {
+    if (usingCloudAuth) {
+      try {
+        const raw = localStorage.getItem(getCloudCacheKey());
+        if (!raw) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+        const parsed = JSON.parse(raw);
+        const loadedItems = Array.isArray(parsed?.items) ? parsed.items.map(normalizeItem).filter(Boolean) : [];
+        const loadedRecipes = Array.isArray(parsed?.recipes) ? parsed.recipes.map(normalizeRecipe).filter(Boolean) : [];
+        const loadedPlan = parsed?.mealPlan || {};
+        const entries = Array.isArray(loadedPlan.entries) ? loadedPlan.entries.map(normalizePlanEntry).filter(Boolean) : [];
+        return { items: loadedItems, recipes: loadedRecipes, mealPlan: { start: String(loadedPlan.start ?? ""), days: Math.max(1, clampInt(loadedPlan.days ?? 7)), entries } };
+      } catch {
+        return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+      }
+    }
     const encRaw = localStorage.getItem(ENC_KEY_PREFIX + currentUser);
     if (!encRaw) {
       const legacyRaw = localStorage.getItem(STORAGE_KEY);
@@ -665,6 +716,23 @@
     }
   }
 
+  async function restoreCloudSession() {
+    if (!supabaseClient) return false;
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error || !data?.session?.user) return false;
+    currentUser = data.session.user.email || data.session.user.id;
+    usingCloudAuth = true;
+    sessionKey = null;
+    const loaded = await load();
+    items = loaded.items;
+    recipes = loaded.recipes;
+    mealPlan = loaded.mealPlan;
+    els.authWrap.classList.add("hidden");
+    els.app.classList.remove("hidden");
+    render();
+    return true;
+  }
+
   function setAuthStatus(msg, bad = false) {
     els.authStatus.textContent = msg;
     els.authStatus.style.color = bad ? "#c00" : "";
@@ -680,6 +748,20 @@
   }
 
   async function signup() {
+    if (supabaseClient) {
+      const email = els.signupUser.value.trim();
+      const password = els.signupPass.value;
+      const password2 = els.signupPass2.value;
+      if (!email.includes("@")) return setAuthStatus("Use an email address for cloud sign up.", true);
+      if (password.length < 10) return setAuthStatus("Password must be at least 10 characters.", true);
+      if (password !== password2) return setAuthStatus("Passwords do not match.", true);
+      const { error } = await supabaseClient.auth.signUp({ email, password });
+      if (error) return setAuthStatus(error.message || "Could not create cloud account.", true);
+      setAuthView("login");
+      els.loginUser.value = email;
+      setAuthStatus("Cloud account created. Check email if confirmation is required.");
+      return;
+    }
     const username = els.signupUser.value.trim();
     const password = els.signupPass.value;
     const password2 = els.signupPass2.value;
@@ -703,6 +785,23 @@
   }
 
   async function login() {
+    if (supabaseClient) {
+      const email = els.loginUser.value.trim();
+      const password = els.loginPass.value;
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (error || !data?.user) return setAuthStatus(error?.message || "Invalid email or password.", true);
+      currentUser = data.user.email || data.user.id;
+      usingCloudAuth = true;
+      sessionKey = null;
+      const loaded = await load();
+      items = loaded.items;
+      recipes = loaded.recipes;
+      mealPlan = loaded.mealPlan;
+      els.authWrap.classList.add("hidden");
+      els.app.classList.remove("hidden");
+      render();
+      return;
+    }
     const records = getAuthRecord() || {};
     if (!Object.keys(records).length) return setAuthStatus("No account found. Please sign up first.", true);
 
@@ -727,6 +826,25 @@
     els.authWrap.classList.add("hidden");
     els.app.classList.remove("hidden");
     render();
+  }
+
+
+
+  async function logout() {
+    if (supabaseClient && usingCloudAuth) {
+      await supabaseClient.auth.signOut();
+    }
+    currentUser = null;
+    sessionKey = null;
+    usingCloudAuth = false;
+    items = [];
+    recipes = [];
+    mealPlan = { start: "", days: 7, entries: [] };
+    els.app.classList.add("hidden");
+    els.authWrap.classList.remove("hidden");
+    setAuthView("login");
+    setAuthStatus(supabaseClient ? "Signed out." : "");
+    els.loginPass.value = "";
   }
 
   function makeBestBeforeDates(qty, dateValue = "") {
@@ -1139,6 +1257,7 @@ function addRecipeFromForm() {
   els.closeImport.addEventListener("click", () => closeDialog(els.importDialog));
   els.doImport.addEventListener("click", () => { const res = importData(els.importText.value); if (!res) return; alert(res.msg); if (res.ok) closeDialog(els.importDialog); });
   els.wipe.addEventListener("click", () => { if (!confirm("Delete all inventory items on this device?")) return; items = []; render(); });
+  els.logoutBtn.addEventListener("click", () => { logout().catch(() => setAuthStatus("Could not sign out.", true)); });
   els.closeBestBefore.addEventListener("click", () => { editingBestBeforeId = null; closeDialog(els.bestBeforeDialog); });
   els.saveBestBefore.addEventListener("click", saveBestBeforeDates);
 
@@ -1152,6 +1271,11 @@ function addRecipeFromForm() {
 
   setAppTab("inventory");
   setAuthView("login");
+  supabaseClient = initCloudAuthClient();
+  if (supabaseClient) {
+    setAuthStatus("Cloud auth enabled. Use email + password.");
+    restoreCloudSession().catch(() => {});
+  }
 })();
 </script>
   </main>
