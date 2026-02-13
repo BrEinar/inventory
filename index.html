@@ -520,6 +520,43 @@
     else el.removeAttribute("open");
   }
 
+  async function fetchProductNameByBarcode(barcode) {
+    const code = String(barcode ?? "").trim();
+    if (!code) return "";
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+
+    try {
+      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) return "";
+
+      const data = await res.json();
+      return String(data?.product?.product_name || data?.product?.product_name_en || "").trim();
+    } catch {
+      return "";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function autoFillNameFromBarcode(barcode) {
+    const foundName = await fetchProductNameByBarcode(barcode);
+    if (els.sku.value.trim() !== barcode) return;
+
+    if (foundName) {
+      if (!els.name.value.trim()) els.name.value = foundName;
+      els.scanStatus.textContent = `Scanned: ${barcode} (name found online)`;
+      els.qty.focus();
+      return;
+    }
+
+    els.scanStatus.textContent = `Scanned: ${barcode} (no product name found online)`;
+    els.name.focus();
+  }
+
   async function startScan() {
     // Camera requires secure context. localhost over http is allowed in Chrome.
     if (!window.isSecureContext) {
@@ -546,9 +583,18 @@
         if (result?.text) {
           const value = result.text.trim();
           els.sku.value = value;
-          els.scanStatus.textContent = `Scanned: ${value}`;
+          const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase());
+
           stopScan();
-          els.sku.focus();
+
+          if (existing?.name) {
+            els.name.value = existing.name;
+            els.scanStatus.textContent = `Scanned: ${value} (name auto-filled from inventory)`;
+            els.qty.focus();
+          } else {
+            els.scanStatus.textContent = `Scanned: ${value}. Looking up name online…`;
+            autoFillNameFromBarcode(value);
+          }
           return;
         }
         if (!err) return;
