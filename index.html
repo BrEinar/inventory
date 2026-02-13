@@ -354,6 +354,10 @@
         Servings
         <input id="planServings" type="number" min="1" step="1" value="1" />
       </label>
+      <label>
+        Entry date
+        <input id="planDate" type="date" />
+      </label>
       <button id="addPlanEntryBtn">Add to period</button>
     </div>
     <div id="planEntries" class="grid" style="margin-top:10px;"></div>
@@ -382,6 +386,7 @@
 (() => {
   const STORAGE_KEY = "inventory_v1";
   const AUTH_KEY = "inventory_auth_v1";
+  const AUTH_USERS_KEY = "inventory_auth_users_v2";
   const ENC_KEY_PREFIX = "inventory_encrypted_v1_";
   const PBKDF2_ITERATIONS = 210000;
   const $ = (id) => document.getElementById(id);
@@ -452,6 +457,7 @@
     planDays: $("planDays"),
     planRecipe: $("planRecipe"),
     planServings: $("planServings"),
+    planDate: $("planDate"),
     addPlanEntryBtn: $("addPlanEntryBtn"),
     planEntries: $("planEntries"),
     buildShoppingBtn: $("buildShoppingBtn"),
@@ -563,7 +569,22 @@
     if (!x) return null;
     const recipeId = String(x.recipeId ?? "").trim();
     if (!recipeId) return null;
-    return { id: String(x.id ?? crypto.randomUUID()), recipeId, servings: Math.max(1, clampInt(x.servings ?? 1)) };
+    const date = String(x.date ?? "").trim();
+    return { id: String(x.id ?? crypto.randomUUID()), recipeId, servings: Math.max(1, clampInt(x.servings ?? 1)), date };
+  }
+
+  function getAuthRecords() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(AUTH_USERS_KEY) || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      return parsed;
+    } catch {
+      return {};
+    }
+  }
+
+  function saveAuthRecords(records) {
+    localStorage.setItem(AUTH_USERS_KEY, JSON.stringify(records));
   }
 
   async function deriveKeyMaterial(password) {
@@ -581,9 +602,13 @@
 
   function getAuthRecord() {
     try {
+      const records = getAuthRecords();
+      if (Object.keys(records).length) return records;
       const parsed = JSON.parse(localStorage.getItem(AUTH_KEY) || "null");
-      if (!parsed || !parsed.username || !parsed.salt || !parsed.pwdHash) return null;
-      return parsed;
+      if (!parsed || !parsed.username || !parsed.salt || !parsed.pwdHash) return {};
+      const migrated = { [parsed.username]: parsed };
+      saveAuthRecords(migrated);
+      return migrated;
     } catch { return null; }
   }
 
@@ -658,15 +683,18 @@
     const username = els.signupUser.value.trim();
     const password = els.signupPass.value;
     const password2 = els.signupPass2.value;
+    const authRecords = getAuthRecord() || {};
     if (!username || username.length < 3) return setAuthStatus("Username must be at least 3 characters.", true);
-    if (getAuthRecord()) return setAuthStatus("Account already exists on this device. Please login.", true);
+    if (authRecords[username]) return setAuthStatus("That username already exists on this device. Please login.", true);
     if (password.length < 10) return setAuthStatus("Password must be at least 10 characters.", true);
     if (password !== password2) return setAuthStatus("Passwords do not match.", true);
 
     const material = await deriveKeyMaterial(password);
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const authHash = await deriveAuth(material, salt, PBKDF2_ITERATIONS);
-    localStorage.setItem(AUTH_KEY, JSON.stringify({ username, salt: b64FromBytes(salt), pwdHash: b64FromBytes(authHash), iterations: PBKDF2_ITERATIONS }));
+    authRecords[username] = { username, salt: b64FromBytes(salt), pwdHash: b64FromBytes(authHash), iterations: PBKDF2_ITERATIONS };
+    saveAuthRecords(authRecords);
+    localStorage.removeItem(AUTH_KEY);
     els.loginUser.value = username;
     els.loginPass.value = "";
     setAppTab("inventory");
@@ -675,12 +703,13 @@
   }
 
   async function login() {
-    const rec = getAuthRecord();
-    if (!rec) return setAuthStatus("No account found. Please sign up first.", true);
+    const records = getAuthRecord() || {};
+    if (!Object.keys(records).length) return setAuthStatus("No account found. Please sign up first.", true);
 
     const username = els.loginUser.value.trim();
     const password = els.loginPass.value;
-    if (username !== rec.username) return setAuthStatus("Invalid username or password.", true);
+    const rec = records[username];
+    if (!rec) return setAuthStatus("Invalid username or password.", true);
 
     const material = await deriveKeyMaterial(password);
     const salt = bytesFromB64(rec.salt);
@@ -847,9 +876,9 @@
 
   function parseCSV(text) { const rows=[]; let i=0,field="",row=[],inQuotes=false; while(i<text.length){const c=text[i]; if(inQuotes){ if(c==='"'){ if(text[i+1]==='"'){field+='"';i+=2;continue;} inQuotes=false;i++;continue;} field+=c;i++;continue; } else { if(c==='"'){inQuotes=true;i++;continue;} if(c===","){row.push(field);field="";i++;continue;} if(c==="\n"){row.push(field);rows.push(row);field="";row=[];i++;continue;} if(c==="\r"){i++;continue;} field+=c;i++;continue; } } row.push(field); rows.push(row); return rows.filter(r=>r.some(x=>String(x).trim()!=="")); }
 
-  function importData(text) { const t = text.trim(); if (!t) return; try { const obj = JSON.parse(t); let incoming = null; if (Array.isArray(obj)) incoming = obj; else if (obj && Array.isArray(obj.items)) incoming = obj.items; if (incoming) { const normalized = incoming.map(normalizeItem).filter(Boolean); for (const it of normalized) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it); } render(); return { ok: true, msg: `Imported ${normalized.length} item(s) from JSON.` }; } } catch {}
+  function importData(text) { const t = text.trim(); if (!t) return; try { const obj = JSON.parse(t); let incoming = null; if (Array.isArray(obj)) incoming = obj; else if (obj && Array.isArray(obj.items)) incoming = obj.items; if (incoming) { const normalized = incoming.map(normalizeItem).filter(Boolean); let added = 0, updated = 0; for (const it of normalized) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); updated++; continue; } } it.updatedAt = nowISO(); items.push(it); added++; } render(); return { ok: true, msg: `Imported ${normalized.length} item(s) from JSON (${added} added, ${updated} updated).` }; } } catch {}
     const rows = parseCSV(t); if (rows.length < 2) return { ok:false, msg:"CSV needs a header row and at least one data row." }; const header = rows[0].map(h => String(h).trim().toLowerCase()); const idx = (key)=>header.indexOf(key); const imported=[];
-    for (let r=1; r<rows.length; r++) { const row = rows[r]; const it = normalizeItem({ id: crypto.randomUUID(), name: row[idx("name")] ?? "", sku: row[idx("sku")] ?? "", qty: row[idx("qty")] ?? 0, unitValue: row[idx("unitvalue")] ?? 0, unitType: row[idx("unittype")] ?? "", loc: row[idx("loc")] ?? "", min: row[idx("min")] ?? 0, bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x=>x.trim()).filter(Boolean), notes: row[idx("notes")] ?? "", updatedAt: row[idx("updatedat")] ?? nowISO() }); if (!it.name && !it.sku) continue; imported.push(it);} for (const it of imported) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it);} render(); return { ok:true, msg:`Imported ${imported.length} item(s) from CSV.`}; }
+    for (let r=1; r<rows.length; r++) { const row = rows[r]; const it = normalizeItem({ id: crypto.randomUUID(), name: row[idx("name")] ?? "", sku: row[idx("sku")] ?? "", qty: row[idx("qty")] ?? 0, unitValue: row[idx("unitvalue")] ?? 0, unitType: row[idx("unittype")] ?? "", loc: row[idx("loc")] ?? "", min: row[idx("min")] ?? 0, bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x=>x.trim()).filter(Boolean), notes: row[idx("notes")] ?? "", updatedAt: row[idx("updatedat")] ?? nowISO() }); if (!it.name && !it.sku) continue; imported.push(it);} let added = 0, updated = 0; for (const it of imported) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); updated++; continue; } } it.updatedAt = nowISO(); items.push(it); added++; } render(); return { ok:true, msg:`Imported ${imported.length} item(s) from CSV (${added} added, ${updated} updated).`}; }
 
 
 
@@ -903,9 +932,32 @@ function addRecipeFromForm() {
     mealPlan.start = els.planStart.value;
     mealPlan.days = Math.max(1, clampInt(els.planDays.value));
     const recipeId = els.planRecipe.value;
+    const entryDate = String(els.planDate.value || mealPlan.start || "").trim();
     if (!recipeId) return;
-    mealPlan.entries.push(normalizePlanEntry({ id: crypto.randomUUID(), recipeId, servings: Math.max(1, clampInt(els.planServings.value)) }));
+    mealPlan.entries.push(normalizePlanEntry({ id: crypto.randomUUID(), recipeId, servings: Math.max(1, clampInt(els.planServings.value)), date: entryDate }));
     render();
+  }
+
+  function toDateOnly(value) {
+    if (!value) return null;
+    const d = new Date(`${value}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return null;
+    return d;
+  }
+
+  function isEntryInPlanningWindow(entryDate, start, days) {
+    if (!start || !entryDate) return true;
+    const s = toDateOnly(start);
+    const e = toDateOnly(entryDate);
+    if (!s || !e) return true;
+    const end = new Date(s);
+    end.setDate(end.getDate() + Math.max(1, days) - 1);
+    return e >= s && e <= end;
+  }
+
+  function ingredientKey(name) {
+    const base = String(name || "").trim().toLowerCase();
+    return base.replace(/\b([a-z]{3,})s\b/g, "$1");
   }
 
   function renderMealPlan() {
@@ -917,7 +969,8 @@ function addRecipeFromForm() {
       const rec = recipes.find(r => r.id === entry.recipeId);
       const row = document.createElement("div");
       row.className = "row";
-      row.innerHTML = `<div>${escapeHtml(rec?.name || "(deleted recipe)")} • ${entry.servings} servings</div><button class="danger" data-plan-del="${entry.id}">Remove</button>`;
+      const dateLabel = entry.date ? ` • ${entry.date}` : "";
+      row.innerHTML = `<div>${escapeHtml(rec?.name || "(deleted recipe)")} • ${entry.servings} servings${dateLabel}</div><button class="danger" data-plan-del="${entry.id}">Remove</button>`;
       els.planEntries.appendChild(row);
     }
   }
@@ -937,11 +990,12 @@ function addRecipeFromForm() {
     mealPlan.days = Math.max(1, clampInt(els.planDays.value));
     const required = new Map();
     for (const entry of mealPlan.entries) {
+      if (!isEntryInPlanningWindow(entry.date, mealPlan.start, mealPlan.days)) continue;
       const rec = recipes.find(r => r.id === entry.recipeId);
       if (!rec) continue;
       const scale = entry.servings / Math.max(1, rec.servings);
       for (const ing of rec.ingredients) {
-        const key = ing.name.trim().toLowerCase();
+        const key = ingredientKey(ing.name);
         const base = unitToBase(ing.amount * scale, ing.unit);
         if (!required.has(key)) required.set(key, { name: ing.name, amount: 0, kind: base.kind, unit: base.unit });
         const r = required.get(key);
@@ -951,7 +1005,7 @@ function addRecipeFromForm() {
 
     const available = new Map();
     for (const it of items) {
-      const key = it.name.trim().toLowerCase();
+      const key = ingredientKey(it.name);
       if (!key) continue;
       let base;
       if (it.unitType && it.unitValue > 0) base = unitToBase(it.qty * it.unitValue, it.unitType);
@@ -1050,7 +1104,7 @@ function addRecipeFromForm() {
     els.scanStatus.textContent = `Scanned: ${barcode} (no product details found online)`;
     els.name.focus();
   }
-  function parseBestBeforeFromScan(text) { const raw = String(text ?? "").trim(); if (!raw) return ""; if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw; const dmyOrMdy = raw.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})\b/); if (dmyOrMdy) { let a = Number(dmyOrMdy[1]); let b = Number(dmyOrMdy[2]); let y = Number(dmyOrMdy[3]); if (y < 100) y += 2000; const day = a > 12 ? a : b; const month = a > 12 ? b : a; return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`; } const ymd = raw.match(/\b(\d{4})(\d{2})(\d{2})\b/); if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`; return ""; }
+  function parseBestBeforeFromScan(text) { const raw = String(text ?? "").trim(); if (!raw) return ""; if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw; const dmyOrMdy = raw.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})\b/); if (dmyOrMdy) { let a = Number(dmyOrMdy[1]); let b = Number(dmyOrMdy[2]); let y = Number(dmyOrMdy[3]); if (y < 100) y += 2000; if (a <= 12 && b <= 12) return ""; const day = a > 12 ? a : b; const month = a > 12 ? b : a; return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`; } const ymd = raw.match(/\b(\d{4})(\d{2})(\d{2})\b/); if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`; return ""; }
   async function startScan(mode = "sku") { if (!window.isSecureContext) { alert("Camera access is blocked because this page isn't opened in a secure context."); return; } if (!navigator.mediaDevices?.getUserMedia) { alert("Camera API not available in this browser."); return; } if (!window.ZXing) { alert("Scanner library failed to load (need internet)."); return; }
     els.scanStatus.textContent = "Starting camera…"; openDialog(els.scanDialog); codeReader = new ZXing.BrowserMultiFormatReader();
     try { const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false }; await codeReader.decodeFromConstraints(constraints, els.video, (result, err) => { if (result?.text) { const value = result.text.trim(); stopScan(); if (mode === "bestBefore") { const parsedDate = parseBestBeforeFromScan(value); if (parsedDate) { els.bestBefore.value = parsedDate; els.scanStatus.textContent = `Scanned best before date: ${parsedDate}`; } else { els.scanStatus.textContent = `Scanned text did not look like a date: ${value}`; } els.bestBefore.focus(); } else { els.sku.value = value; const parsedMeasure = parseMeasureFromGs1Barcode(value); const filledFromScan = fillUnitFromMeasure(parsedMeasure); const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase()); if (existing?.name) { els.name.value = existing.name; els.scanStatus.textContent = `Scanned: ${value} (${filledFromScan ? "name + measure" : "name"} auto-filled from inventory)`; els.qty.focus(); } else { els.scanStatus.textContent = `Scanned: ${value}${filledFromScan ? " (measure found in barcode)." : "."} Looking up details online…`; autoFillFromBarcode(value); } } return; }
