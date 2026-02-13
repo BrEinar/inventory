@@ -820,8 +820,10 @@
     for (const line of lines) {
       const parts = line.split(",").map(x => x.trim());
       const name = parts[0] || "";
-      const amount = clampFloat(parts[1] ?? 0);
-      const unit = String(parts[2] ?? "").toLowerCase();
+      const hasExplicitAmount = String(parts[1] ?? "").trim() !== "";
+      const parsedAmount = clampFloat(parts[1] ?? 0);
+      const amount = hasExplicitAmount && parsedAmount > 0 ? parsedAmount : 1;
+      const unit = String(parts[2] ?? "").toLowerCase() || "pcs";
       const ing = normalizeRecipeIngredient({ name, amount, unit });
       if (ing) out.push(ing);
     }
