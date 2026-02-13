@@ -103,10 +103,10 @@ Use this as a working task board. Each task maps directly to the plan points abo
   - [x] Create `meal_plan_entries` table.
   - [x] Create `shopping_list_items` table.
 
-- [ ] **Task 1.3 — Add `household_id` to shared entities.**
-  - [ ] Ensure every shared table includes `household_id`.
-  - [ ] Add foreign keys and indexes for `household_id`.
-  - [ ] Backfill/default `household_id` strategy for existing data.
+- [x] **Task 1.3 — Add `household_id` to shared entities.**
+  - [x] Ensure every shared table includes `household_id`.
+  - [x] Add foreign keys and indexes for `household_id`.
+  - [x] Backfill/default `household_id` strategy for existing data.
 
 - [ ] **Task 1.4 — Enforce household access policies.**
   - [ ] Enable row-level security (or equivalent).
