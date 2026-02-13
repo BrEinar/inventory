@@ -1588,7 +1588,14 @@ function addRecipeFromForm() {
   els.importBtn.addEventListener("click", () => { els.importText.value = ""; openDialog(els.importDialog); });
   els.closeImport.addEventListener("click", () => closeDialog(els.importDialog));
   els.doImport.addEventListener("click", () => { const res = importData(els.importText.value); if (!res) return; alert(res.msg); if (res.ok) closeDialog(els.importDialog); });
-  els.wipe.addEventListener("click", () => { if (!confirm("Delete all inventory items on this device?")) return; items = []; render(); });
+  els.wipe.addEventListener("click", () => {
+    const confirmMsg = usingCloudAuth
+      ? "Delete all inventory items for this household? This syncs to every connected device."
+      : "Delete all inventory items on this device?";
+    if (!confirm(confirmMsg)) return;
+    items = [];
+    render();
+  });
   els.logoutBtn.addEventListener("click", () => { logout().catch(() => setAuthStatus("Could not sign out.", true)); });
   els.closeBestBefore.addEventListener("click", () => { editingBestBeforeId = null; closeDialog(els.bestBeforeDialog); });
   els.saveBestBefore.addEventListener("click", saveBestBeforeDates);
