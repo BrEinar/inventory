@@ -41,6 +41,7 @@
     .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(127,127,127,.3); display:inline-block; }
     .danger { color: #c00; }
     .grid { display:grid; gap:10px; }
+    .split { display:grid; gap:10px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
     dialog {
       width: min(680px, 96vw);
       border: 1px solid rgba(127,127,127,.35);
@@ -294,6 +295,60 @@
     </div>
   </dialog>
 
+
+  <div class="card">
+    <h2 style="margin:0 0 8px;">🍳 Recipes</h2>
+    <div class="split">
+      <div class="grid">
+        <label>
+          Recipe name
+          <input id="recipeName" placeholder="e.g., Pasta salad" autocomplete="off" />
+        </label>
+        <label>
+          Default servings
+          <input id="recipeServings" type="number" min="1" step="1" value="1" />
+        </label>
+        <label>
+          Ingredients (one per line: name, amount, unit)
+          <textarea id="recipeIngredients" rows="6" placeholder="Tomato, 3, pcs&#10;Olive oil, 30, ml"></textarea>
+        </label>
+        <button id="addRecipeBtn" class="primary">Add recipe</button>
+      </div>
+      <div>
+        <div class="muted small">Saved recipes</div>
+        <div id="recipeList" class="grid" style="margin-top:8px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 8px;">🗓️ Meal plan & shopping list</h2>
+    <div class="row">
+      <label>
+        Start date
+        <input id="planStart" type="date" />
+      </label>
+      <label>
+        Days
+        <input id="planDays" type="number" min="1" max="60" value="7" />
+      </label>
+      <label>
+        Recipe
+        <select id="planRecipe"></select>
+      </label>
+      <label>
+        Servings
+        <input id="planServings" type="number" min="1" step="1" value="1" />
+      </label>
+      <button id="addPlanEntryBtn">Add to period</button>
+    </div>
+    <div id="planEntries" class="grid" style="margin-top:10px;"></div>
+    <div style="margin-top:10px;">
+      <button id="buildShoppingBtn" class="primary">Build missing shopping list</button>
+    </div>
+    <div id="shoppingList" class="grid" style="margin-top:10px;"></div>
+  </div>
+
   <dialog id="importDialog">
     <h3 style="margin:0 0 8px;">Import inventory</h3>
     <div class="muted small">Paste JSON (exported from this app) OR CSV (header row required).</div>
@@ -371,6 +426,21 @@
     bestBeforeInputs: $("bestBeforeInputs"),
     closeBestBefore: $("closeBestBefore"),
     saveBestBefore: $("saveBestBefore"),
+
+    recipeName: $("recipeName"),
+    recipeServings: $("recipeServings"),
+    recipeIngredients: $("recipeIngredients"),
+    addRecipeBtn: $("addRecipeBtn"),
+    recipeList: $("recipeList"),
+
+    planStart: $("planStart"),
+    planDays: $("planDays"),
+    planRecipe: $("planRecipe"),
+    planServings: $("planServings"),
+    addPlanEntryBtn: $("addPlanEntryBtn"),
+    planEntries: $("planEntries"),
+    buildShoppingBtn: $("buildShoppingBtn"),
+    shoppingList: $("shoppingList"),
   };
 
   let items = [];
@@ -378,6 +448,8 @@
   let editingBestBeforeId = null;
   let currentUser = null;
   let sessionKey = null;
+  let recipes = [];
+  let mealPlan = { start: "", days: 7, entries: [] };
 
   function nowISO() { return new Date().toISOString(); }
   function clampInt(v) {
@@ -426,6 +498,36 @@
     };
   }
 
+
+  function normalizeRecipeIngredient(x) {
+    if (!x) return null;
+    const name = String(x.name ?? "").trim();
+    if (!name) return null;
+    const amount = clampFloat(x.amount ?? 0);
+    const unitRaw = String(x.unit ?? "").trim().toLowerCase();
+    const unit = ["g","kg","ml","l","pcs",""] .includes(unitRaw) ? unitRaw : "";
+    return { name, amount, unit };
+  }
+
+  function normalizeRecipe(x) {
+    if (!x) return null;
+    const ingredients = Array.isArray(x.ingredients) ? x.ingredients.map(normalizeRecipeIngredient).filter(Boolean) : [];
+    return {
+      id: String(x.id ?? crypto.randomUUID()),
+      name: String(x.name ?? "").trim(),
+      servings: Math.max(1, clampInt(x.servings ?? 1)),
+      ingredients,
+      updatedAt: String(x.updatedAt ?? nowISO()),
+    };
+  }
+
+  function normalizePlanEntry(x) {
+    if (!x) return null;
+    const recipeId = String(x.recipeId ?? "").trim();
+    if (!recipeId) return null;
+    return { id: String(x.id ?? crypto.randomUUID()), recipeId, servings: Math.max(1, clampInt(x.servings ?? 1)) };
+  }
+
   async function deriveKeyMaterial(password) {
     return crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits", "deriveKey"]);
   }
@@ -457,7 +559,8 @@
   async function save() {
     if (!sessionKey || !currentUser) return;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const plain = new TextEncoder().encode(JSON.stringify(items));
+    const payload = { version: 2, items, recipes, mealPlan };
+    const plain = new TextEncoder().encode(JSON.stringify(payload));
     const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, sessionKey, plain);
     localStorage.setItem(ENC_KEY_PREFIX + currentUser, JSON.stringify({ iv: b64FromBytes(iv), data: b64FromBytes(cipher) }));
   }
@@ -466,16 +569,18 @@
     const encRaw = localStorage.getItem(ENC_KEY_PREFIX + currentUser);
     if (!encRaw) {
       const legacyRaw = localStorage.getItem(STORAGE_KEY);
-      if (!legacyRaw) return [];
+      if (!legacyRaw) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
       try {
         const parsed = JSON.parse(legacyRaw);
-        if (!Array.isArray(parsed)) return [];
+        if (!Array.isArray(parsed)) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
         const migrated = parsed.map(normalizeItem).filter(Boolean);
         items = migrated;
+        recipes = [];
+        mealPlan = { start: "", days: 7, entries: [] };
         await save();
         localStorage.removeItem(STORAGE_KEY);
-        return migrated;
-      } catch { return []; }
+        return { items: migrated, recipes: [], mealPlan };
+      } catch { return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } }; }
     }
 
     try {
@@ -484,10 +589,16 @@
       const data = bytesFromB64(payload.data);
       const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, sessionKey, data);
       const parsed = JSON.parse(new TextDecoder().decode(plain));
-      if (!Array.isArray(parsed)) return [];
-      return parsed.map(normalizeItem).filter(Boolean);
+      if (Array.isArray(parsed)) {
+        return { items: parsed.map(normalizeItem).filter(Boolean), recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+      }
+      const loadedItems = Array.isArray(parsed?.items) ? parsed.items.map(normalizeItem).filter(Boolean) : [];
+      const loadedRecipes = Array.isArray(parsed?.recipes) ? parsed.recipes.map(normalizeRecipe).filter(Boolean) : [];
+      const loadedPlan = parsed?.mealPlan || {};
+      const entries = Array.isArray(loadedPlan.entries) ? loadedPlan.entries.map(normalizePlanEntry).filter(Boolean) : [];
+      return { items: loadedItems, recipes: loadedRecipes, mealPlan: { start: String(loadedPlan.start ?? ""), days: Math.max(1, clampInt(loadedPlan.days ?? 7)), entries } };
     } catch {
-      return [];
+      return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
     }
   }
 
@@ -541,7 +652,10 @@
 
     sessionKey = await deriveAesKey(material, salt, iterations);
     currentUser = rec.username;
-    items = await load();
+    const loaded = await load();
+    items = loaded.items;
+    recipes = loaded.recipes;
+    mealPlan = loaded.mealPlan;
     els.authWrap.classList.add("hidden");
     els.app.classList.remove("hidden");
     render();
@@ -628,6 +742,8 @@
         </td>`;
       els.rows.appendChild(tr);
     }
+    renderRecipes();
+    renderMealPlan();
     save().catch(() => {});
   }
 
@@ -695,6 +811,134 @@
   function importData(text) { const t = text.trim(); if (!t) return; try { const obj = JSON.parse(t); let incoming = null; if (Array.isArray(obj)) incoming = obj; else if (obj && Array.isArray(obj.items)) incoming = obj.items; if (incoming) { const normalized = incoming.map(normalizeItem).filter(Boolean); for (const it of normalized) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it); } render(); return { ok: true, msg: `Imported ${normalized.length} item(s) from JSON.` }; } } catch {}
     const rows = parseCSV(t); if (rows.length < 2) return { ok:false, msg:"CSV needs a header row and at least one data row." }; const header = rows[0].map(h => String(h).trim().toLowerCase()); const idx = (key)=>header.indexOf(key); const imported=[];
     for (let r=1; r<rows.length; r++) { const row = rows[r]; const it = normalizeItem({ id: crypto.randomUUID(), name: row[idx("name")] ?? "", sku: row[idx("sku")] ?? "", qty: row[idx("qty")] ?? 0, unitValue: row[idx("unitvalue")] ?? 0, unitType: row[idx("unittype")] ?? "", loc: row[idx("loc")] ?? "", min: row[idx("min")] ?? 0, bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x=>x.trim()).filter(Boolean), notes: row[idx("notes")] ?? "", updatedAt: row[idx("updatedat")] ?? nowISO() }); if (!it.name && !it.sku) continue; imported.push(it);} for (const it of imported) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it);} render(); return { ok:true, msg:`Imported ${imported.length} item(s) from CSV.`}; }
+
+
+
+  function parseRecipeIngredientsText(text) {
+    const lines = String(text ?? "").split(/\n+/).map(x => x.trim()).filter(Boolean);
+    const out = [];
+    for (const line of lines) {
+      const parts = line.split(",").map(x => x.trim());
+      const name = parts[0] || "";
+      const amount = clampFloat(parts[1] ?? 0);
+      const unit = String(parts[2] ?? "").toLowerCase();
+      const ing = normalizeRecipeIngredient({ name, amount, unit });
+      if (ing) out.push(ing);
+    }
+    return out;
+  }
+  
+
+function addRecipeFromForm() {
+    const name = els.recipeName.value.trim();
+    if (!name) return alert("Recipe name is required.");
+    const servings = Math.max(1, clampInt(els.recipeServings.value));
+    const ingredients = parseRecipeIngredientsText(els.recipeIngredients.value);
+    if (!ingredients.length) return alert("Add at least one ingredient line.");
+    recipes.push(normalizeRecipe({ id: crypto.randomUUID(), name, servings, ingredients, updatedAt: nowISO() }));
+    els.recipeName.value = "";
+    els.recipeServings.value = "1";
+    els.recipeIngredients.value = "";
+    render();
+  }
+
+  function renderRecipes() {
+    els.recipeList.innerHTML = "";
+    if (!recipes.length) {
+      els.recipeList.innerHTML = `<div class="muted">No recipes yet.</div>`;
+    } else {
+      for (const rec of recipes.slice().sort((a,b) => a.name.localeCompare(b.name))) {
+        const div = document.createElement("div");
+        div.className = "card";
+        const ingredientPreview = rec.ingredients.map(i => `${escapeHtml(i.name)} (${i.amount || ""}${escapeHtml(i.unit)})`).join(", ");
+        div.innerHTML = `<div><strong>${escapeHtml(rec.name)}</strong> <span class="muted small">(${rec.servings} servings)</span></div><div class="muted small">${ingredientPreview}</div><div style="margin-top:8px;"><button class="danger" data-recipe-del="${rec.id}">Delete</button></div>`;
+        els.recipeList.appendChild(div);
+      }
+    }
+    els.planRecipe.innerHTML = recipes.length ? recipes.map(r => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join("") : '<option value="">No recipes</option>';
+  }
+
+  function addPlanEntry() {
+    mealPlan.start = els.planStart.value;
+    mealPlan.days = Math.max(1, clampInt(els.planDays.value));
+    const recipeId = els.planRecipe.value;
+    if (!recipeId) return;
+    mealPlan.entries.push(normalizePlanEntry({ id: crypto.randomUUID(), recipeId, servings: Math.max(1, clampInt(els.planServings.value)) }));
+    render();
+  }
+
+  function renderMealPlan() {
+    els.planStart.value = mealPlan.start || els.planStart.value;
+    els.planDays.value = String(mealPlan.days || 7);
+    els.planEntries.innerHTML = "";
+    if (!mealPlan.entries.length) els.planEntries.innerHTML = `<div class="muted">No recipes selected for this period.</div>`;
+    for (const entry of mealPlan.entries) {
+      const rec = recipes.find(r => r.id === entry.recipeId);
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<div>${escapeHtml(rec?.name || "(deleted recipe)")} • ${entry.servings} servings</div><button class="danger" data-plan-del="${entry.id}">Remove</button>`;
+      els.planEntries.appendChild(row);
+    }
+  }
+
+  function unitToBase(amount, unit) {
+    const u = String(unit || "").toLowerCase();
+    if (u === "kg") return { amount: amount * 1000, kind: "mass", unit: "g" };
+    if (u === "g") return { amount, kind: "mass", unit: "g" };
+    if (u === "l") return { amount: amount * 1000, kind: "volume", unit: "ml" };
+    if (u === "ml") return { amount, kind: "volume", unit: "ml" };
+    if (u === "pcs" || !u) return { amount, kind: "count", unit: u || "pcs" };
+    return { amount, kind: "count", unit: u };
+  }
+
+  function buildShoppingList() {
+    mealPlan.start = els.planStart.value;
+    mealPlan.days = Math.max(1, clampInt(els.planDays.value));
+    const required = new Map();
+    for (const entry of mealPlan.entries) {
+      const rec = recipes.find(r => r.id === entry.recipeId);
+      if (!rec) continue;
+      const scale = entry.servings / Math.max(1, rec.servings);
+      for (const ing of rec.ingredients) {
+        const key = ing.name.trim().toLowerCase();
+        const base = unitToBase(ing.amount * scale, ing.unit);
+        if (!required.has(key)) required.set(key, { name: ing.name, amount: 0, kind: base.kind, unit: base.unit });
+        const r = required.get(key);
+        r.amount += base.amount;
+      }
+    }
+
+    const available = new Map();
+    for (const it of items) {
+      const key = it.name.trim().toLowerCase();
+      if (!key) continue;
+      let base;
+      if (it.unitType && it.unitValue > 0) base = unitToBase(it.qty * it.unitValue, it.unitType);
+      else base = unitToBase(it.qty, "pcs");
+      if (!available.has(key)) available.set(key, { amount: 0, kind: base.kind });
+      available.get(key).amount += base.amount;
+    }
+
+    els.shoppingList.innerHTML = "";
+    const missing = [];
+    for (const [key, req] of required.entries()) {
+      const have = available.get(key);
+      const haveAmount = have && have.kind === req.kind ? have.amount : 0;
+      const miss = Math.max(0, req.amount - haveAmount);
+      if (miss > 0) missing.push({ name: req.name, amount: miss, unit: req.unit, kind: req.kind });
+    }
+    if (!missing.length) {
+      els.shoppingList.innerHTML = `<div class="pill">Everything needed is already in inventory 🎉</div>`;
+      return;
+    }
+    for (const m of missing.sort((a,b) => a.name.localeCompare(b.name))) {
+      const amount = (m.unit === "g" && m.amount >= 1000) ? `${(m.amount/1000).toFixed(2).replace(/\.00$/, "")} kg` : (m.unit === "ml" && m.amount >= 1000) ? `${(m.amount/1000).toFixed(2).replace(/\.00$/, "")} l` : `${Number.isInteger(m.amount) ? m.amount : m.amount.toFixed(2)} ${m.unit || "pcs"}`;
+      const div = document.createElement("div");
+      div.className = "card";
+      div.textContent = `${m.name}: ${amount}`;
+      els.shoppingList.appendChild(div);
+    }
+  }
 
   let codeReader = null;
   function openDialog(el){ if (typeof el.showModal === "function") el.showModal(); else el.setAttribute("open",""); }
@@ -798,6 +1042,14 @@
   els.wipe.addEventListener("click", () => { if (!confirm("Delete all inventory items on this device?")) return; items = []; render(); });
   els.closeBestBefore.addEventListener("click", () => { editingBestBeforeId = null; closeDialog(els.bestBeforeDialog); });
   els.saveBestBefore.addEventListener("click", saveBestBeforeDates);
+
+
+  els.addRecipeBtn.addEventListener("click", addRecipeFromForm);
+  els.addPlanEntryBtn.addEventListener("click", addPlanEntry);
+  els.buildShoppingBtn.addEventListener("click", buildShoppingList);
+  els.recipeList.addEventListener("click", (e) => { const btn = e.target.closest("button[data-recipe-del]"); if (!btn) return; const id = btn.dataset.recipeDel; recipes = recipes.filter(r => r.id !== id); mealPlan.entries = mealPlan.entries.filter(x => x.recipeId !== id); render(); });
+  els.planEntries.addEventListener("click", (e) => { const btn = e.target.closest("button[data-plan-del]"); if (!btn) return; const id = btn.dataset.planDel; mealPlan.entries = mealPlan.entries.filter(x => x.id !== id); render(); });
+  [els.planStart, els.planDays].forEach(el => el.addEventListener("change", () => { mealPlan.start = els.planStart.value; mealPlan.days = Math.max(1, clampInt(els.planDays.value)); save().catch(() => {}); }));
 
   setAuthView("login");
 })();
