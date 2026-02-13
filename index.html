@@ -70,9 +70,17 @@
         <button id="scanBtn">Scan</button>
       </div>
 
+      <div style="display:flex; gap:10px; align-items:end;">
+        <button id="scanBestBeforeBtn">Scan best before</button>
+      </div>
+
       <label>
         Quantity
         <input id="qty" type="number" min="0" step="1" value="1" />
+      </label>
+      <label>
+        Best before
+        <input id="bestBefore" type="date" />
       </label>
       <label>
         Location
@@ -141,6 +149,7 @@
             <th class="nowrap">Qty</th>
             <th>Location</th>
             <th class="nowrap">Min</th>
+            <th class="nowrap">Best before</th>
             <th>Notes</th>
             <th class="nowrap">Updated</th>
             <th class="nowrap">Actions</th>
@@ -162,6 +171,16 @@
       <button id="stopScan">Close</button>
     </div>
     <div class="muted small" id="scanStatus" style="margin-top:8px;"></div>
+  </dialog>
+
+  <dialog id="bestBeforeDialog">
+    <h3 style="margin:0 0 8px;">Best before dates</h3>
+    <div class="muted small" id="bestBeforeMeta"></div>
+    <div id="bestBeforeInputs" class="grid" style="margin-top:10px;"></div>
+    <div class="actions">
+      <button id="closeBestBefore">Cancel</button>
+      <button class="primary" id="saveBestBefore">Save dates</button>
+    </div>
   </dialog>
 
   <dialog id="importDialog">
@@ -192,6 +211,8 @@
     notes: $("notes"),
     addBtn: $("addBtn"),
     scanBtn: $("scanBtn"),
+    scanBestBeforeBtn: $("scanBestBeforeBtn"),
+    bestBefore: $("bestBefore"),
 
     search: $("search"),
     lowFilter: $("lowFilter"),
@@ -213,10 +234,17 @@
     video: $("video"),
     stopScan: $("stopScan"),
     scanStatus: $("scanStatus"),
+
+    bestBeforeDialog: $("bestBeforeDialog"),
+    bestBeforeMeta: $("bestBeforeMeta"),
+    bestBeforeInputs: $("bestBeforeInputs"),
+    closeBestBefore: $("closeBestBefore"),
+    saveBestBefore: $("saveBestBefore"),
   };
 
   let items = load();
   let editingId = null;
+  let editingBestBeforeId = null;
 
   function nowISO() { return new Date().toISOString(); }
   function clampInt(v) {
@@ -226,13 +254,21 @@
   }
   function normalizeItem(x) {
     if (!x) return null;
+    const incomingDates = Array.isArray(x.bestBeforeDates)
+      ? x.bestBeforeDates.map(d => String(d ?? "").trim()).filter(Boolean)
+      : [];
+    const qty = clampInt(x.qty ?? 0);
+    const bestBeforeDates = incomingDates.slice(0, qty);
+    while (bestBeforeDates.length < qty) bestBeforeDates.push("");
+
     return {
       id: String(x.id ?? crypto.randomUUID()),
       name: String(x.name ?? "").trim(),
       sku: String(x.sku ?? "").trim(),
-      qty: clampInt(x.qty ?? 0),
+      qty,
       loc: String(x.loc ?? "").trim(),
       min: clampInt(x.min ?? 0),
+      bestBeforeDates,
       notes: String(x.notes ?? "").trim(),
       updatedAt: String(x.updatedAt ?? nowISO()),
     };
@@ -258,6 +294,27 @@
     return d.toLocaleString();
   }
 
+  function makeBestBeforeDates(qty, dateValue = "") {
+    const out = [];
+    const cleanDate = String(dateValue ?? "").trim();
+    for (let i = 0; i < clampInt(qty); i++) out.push(cleanDate);
+    return out;
+  }
+
+  function resizeBestBeforeDates(arr, qty, fillDate = "") {
+    const out = Array.isArray(arr) ? arr.slice(0, clampInt(qty)) : [];
+    const cleanDate = String(fillDate ?? "").trim();
+    while (out.length < clampInt(qty)) out.push(cleanDate);
+    return out;
+  }
+
+  function formatBestBeforeSummary(it) {
+    const withDates = (it.bestBeforeDates || []).filter(Boolean).sort();
+    if (!it.qty) return "—";
+    if (!withDates.length) return `0/${it.qty} dated`;
+    return `${withDates[0]} (${withDates.length}/${it.qty} dated)`;
+  }
+
   function getFilteredSorted() {
     const q = els.search.value.trim().toLowerCase();
     const lowMode = els.lowFilter.value;
@@ -265,7 +322,7 @@
 
     if (q) {
       out = out.filter(it => {
-        const hay = `${it.name} ${it.sku} ${it.loc} ${it.notes}`.toLowerCase();
+        const hay = `${it.name} ${it.sku} ${it.loc} ${it.notes} ${(it.bestBeforeDates || []).join(" ")}`.toLowerCase();
         return hay.includes(q);
       });
     }
@@ -306,10 +363,12 @@
         <td class="nowrap">${it.qty}</td>
         <td>${escapeHtml(it.loc)}</td>
         <td class="nowrap">${it.min}</td>
+        <td class="nowrap">${escapeHtml(formatBestBeforeSummary(it))}</td>
         <td>${escapeHtml(it.notes)}</td>
         <td class="muted nowrap">${escapeHtml(fmtDate(it.updatedAt))}</td>
         <td class="nowrap">
           <button data-act="edit" data-id="${it.id}">Edit</button>
+          <button data-act="dates" data-id="${it.id}">Dates</button>
           <button data-act="plus" data-id="${it.id}">+1</button>
           <button data-act="minus" data-id="${it.id}">-1</button>
           <button class="danger" data-act="del" data-id="${it.id}">Delete</button>
@@ -324,6 +383,7 @@
     const name = els.name.value.trim();
     const sku = els.sku.value.trim();
     const qty = clampInt(els.qty.value);
+    const bestBefore = els.bestBefore.value;
     const loc = els.loc.value.trim();
     const min = clampInt(els.min.value);
     const notes = els.notes.value.trim();
@@ -333,12 +393,22 @@
     let it = sku ? items.find(x => x.sku.toLowerCase() === sku.toLowerCase()) : null;
 
     if (!it) {
-      it = normalizeItem({ id: crypto.randomUUID(), name, sku, qty, loc, min, notes, updatedAt: nowISO() });
+      it = normalizeItem({
+        id: crypto.randomUUID(), name, sku, qty, loc, min, notes,
+        bestBeforeDates: makeBestBeforeDates(qty, bestBefore),
+        updatedAt: nowISO()
+      });
       items.push(it);
     } else {
       const isEditingThisItem = editingId && editingId === it.id;
       it.name = name || it.name;
-      it.qty = isEditingThisItem ? qty : clampInt(it.qty + qty);
+      if (isEditingThisItem) {
+        it.qty = qty;
+        it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, qty, bestBefore);
+      } else {
+        it.qty = clampInt(it.qty + qty);
+        it.bestBeforeDates = (it.bestBeforeDates || []).concat(makeBestBeforeDates(qty, bestBefore));
+      }
       it.loc = loc;
       it.min = min;
       it.notes = notes;
@@ -351,6 +421,7 @@
     els.qty.value = "1";
     els.loc.value = "";
     els.min.value = "0";
+    els.bestBefore.value = "";
     els.notes.value = "";
     els.name.focus();
 
@@ -366,6 +437,7 @@
     els.qty.value = String(it.qty);
     els.loc.value = it.loc;
     els.min.value = String(it.min);
+    els.bestBefore.value = it.bestBeforeDates.find(Boolean) || "";
     els.notes.value = it.notes;
     window.scrollTo({ top: 0, behavior: "smooth" });
     els.name.focus();
@@ -375,7 +447,42 @@
     const it = items.find(x => x.id === id);
     if (!it) return;
     it.qty = clampInt(it.qty + delta);
+    it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, it.qty, "");
     it.updatedAt = nowISO();
+    render();
+  }
+
+  function editBestBeforeDates(id) {
+    const it = items.find(x => x.id === id);
+    if (!it) return;
+
+    editingBestBeforeId = id;
+    els.bestBeforeMeta.textContent = `${it.name || "(unnamed)"} • Qty: ${it.qty}`;
+    els.bestBeforeInputs.innerHTML = "";
+
+    for (let i = 0; i < it.qty; i++) {
+      const row = document.createElement("label");
+      row.innerHTML = `
+        Unit ${i + 1}
+        <input type="date" data-best-before-index="${i}" value="${escapeHtml(it.bestBeforeDates?.[i] || "")}" />
+      `;
+      els.bestBeforeInputs.appendChild(row);
+    }
+
+    openDialog(els.bestBeforeDialog);
+  }
+
+  function saveBestBeforeDates() {
+    const it = items.find(x => x.id === editingBestBeforeId);
+    if (!it) return;
+
+    const inputs = [...els.bestBeforeInputs.querySelectorAll("input[data-best-before-index]")];
+    it.bestBeforeDates = inputs
+      .sort((a, b) => Number(a.dataset.bestBeforeIndex) - Number(b.dataset.bestBeforeIndex))
+      .map(input => String(input.value || "").trim());
+    it.updatedAt = nowISO();
+    editingBestBeforeId = null;
+    closeDialog(els.bestBeforeDialog);
     render();
   }
 
@@ -414,10 +521,10 @@
   }
 
   function exportCSV() {
-    const header = ["name","sku","qty","loc","min","notes","updatedAt"];
+    const header = ["name","sku","qty","loc","min","bestBeforeDates","notes","updatedAt"];
     const lines = [toCSVRow(header)];
     for (const it of items) {
-      lines.push(toCSVRow([it.name, it.sku, it.qty, it.loc, it.min, it.notes, it.updatedAt]));
+      lines.push(toCSVRow([it.name, it.sku, it.qty, it.loc, it.min, (it.bestBeforeDates || []).join("|"), it.notes, it.updatedAt]));
     }
     download(`inventory-${new Date().toISOString().slice(0,10)}.csv`, lines.join("\n"), "text/csv");
   }
@@ -489,6 +596,7 @@
         qty: row[idx("qty")] ?? 0,
         loc: row[idx("loc")] ?? "",
         min: row[idx("min")] ?? 0,
+        bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x => x.trim()).filter(Boolean),
         notes: row[idx("notes")] ?? "",
         updatedAt: row[idx("updatedat")] ?? nowISO(),
       });
@@ -558,7 +666,30 @@
     els.name.focus();
   }
 
-  async function startScan() {
+  function parseBestBeforeFromScan(text) {
+    const raw = String(text ?? "").trim();
+    if (!raw) return "";
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+
+    const dmyOrMdy = raw.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})\b/);
+    if (dmyOrMdy) {
+      let a = Number(dmyOrMdy[1]);
+      let b = Number(dmyOrMdy[2]);
+      let y = Number(dmyOrMdy[3]);
+      if (y < 100) y += 2000;
+      const day = a > 12 ? a : b;
+      const month = a > 12 ? b : a;
+      return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+
+    const ymd = raw.match(/\b(\d{4})(\d{2})(\d{2})\b/);
+    if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+
+    return "";
+  }
+
+  async function startScan(mode = "sku") {
     // Camera requires secure context. localhost over http is allowed in Chrome.
     if (!window.isSecureContext) {
       alert("Camera access is blocked because this page isn't opened in a secure context.\n\nUse Termux: python -m http.server then open http://localhost:8000/inventory.html");
@@ -583,18 +714,29 @@
       await codeReader.decodeFromConstraints(constraints, els.video, (result, err) => {
         if (result?.text) {
           const value = result.text.trim();
-          els.sku.value = value;
-          const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase());
-
           stopScan();
 
-          if (existing?.name) {
-            els.name.value = existing.name;
-            els.scanStatus.textContent = `Scanned: ${value} (name auto-filled from inventory)`;
-            els.qty.focus();
+          if (mode === "bestBefore") {
+            const parsedDate = parseBestBeforeFromScan(value);
+            if (parsedDate) {
+              els.bestBefore.value = parsedDate;
+              els.scanStatus.textContent = `Scanned best before date: ${parsedDate}`;
+            } else {
+              els.scanStatus.textContent = `Scanned text did not look like a date: ${value}`;
+            }
+            els.bestBefore.focus();
           } else {
-            els.scanStatus.textContent = `Scanned: ${value}. Looking up name online…`;
-            autoFillNameFromBarcode(value);
+            els.sku.value = value;
+            const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase());
+
+            if (existing?.name) {
+              els.name.value = existing.name;
+              els.scanStatus.textContent = `Scanned: ${value} (name auto-filled from inventory)`;
+              els.qty.focus();
+            } else {
+              els.scanStatus.textContent = `Scanned: ${value}. Looking up name online…`;
+              autoFillNameFromBarcode(value);
+            }
           }
           return;
         }
@@ -631,7 +773,8 @@
     });
   });
 
-  els.scanBtn.addEventListener("click", startScan);
+  els.scanBtn.addEventListener("click", () => startScan("sku"));
+  els.scanBestBeforeBtn.addEventListener("click", () => startScan("bestBefore"));
   els.stopScan.addEventListener("click", stopScan);
   els.scanDialog.addEventListener("close", stopScan);
   els.scanDialog.addEventListener("cancel", (e) => {
@@ -645,6 +788,7 @@
     const id = btn.dataset.id;
     const act = btn.dataset.act;
     if (act === "edit") editToForm(id);
+    if (act === "dates") editBestBeforeDates(id);
     if (act === "plus") adjustQty(id, 1);
     if (act === "minus") adjustQty(id, -1);
     if (act === "del") delItem(id);
@@ -675,6 +819,12 @@
     items = [];
     render();
   });
+
+  els.closeBestBefore.addEventListener("click", () => {
+    editingBestBeforeId = null;
+    closeDialog(els.bestBeforeDialog);
+  });
+  els.saveBestBefore.addEventListener("click", saveBestBeforeDates);
 
   render();
 })();
