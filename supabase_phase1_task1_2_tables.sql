@@ -387,3 +387,136 @@ create policy shopping_list_items_delete_writer
 -- 1) As owner/editor of household A, verify CRUD succeeds in household A.
 -- 2) As viewer of household A, verify SELECT succeeds and write statements fail.
 -- 3) As member of household B only, verify household A rows are invisible.
+
+-- Phase 2.3 / 2.4 and Phase 3 additions
+
+-- Activity metadata
+alter table public.inventory_items add column if not exists updated_by uuid references auth.users(id);
+alter table public.recipes add column if not exists updated_by uuid references auth.users(id);
+
+-- Keep updated_at fresh automatically.
+create or replace function public.touch_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists inventory_items_touch_updated_at on public.inventory_items;
+create trigger inventory_items_touch_updated_at
+before update on public.inventory_items
+for each row execute function public.touch_updated_at();
+
+drop trigger if exists recipes_touch_updated_at on public.recipes;
+create trigger recipes_touch_updated_at
+before update on public.recipes
+for each row execute function public.touch_updated_at();
+
+-- Invite flow
+create table if not exists public.household_invites (
+  code text primary key,
+  household_id uuid not null references public.households(id) on delete cascade,
+  created_by uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null default (now() + interval '7 days'),
+  used_by uuid references auth.users(id),
+  used_at timestamptz
+);
+
+alter table public.household_invites enable row level security;
+
+drop policy if exists household_invites_select_member on public.household_invites;
+create policy household_invites_select_member
+  on public.household_invites
+  for select
+  using (public.is_household_member(household_id));
+
+-- create invite code (owner only)
+create or replace function public.create_household_invite(target_household_id uuid)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  out_code text;
+begin
+  if not exists (
+    select 1 from public.household_members hm
+    where hm.household_id = target_household_id
+      and hm.user_id = auth.uid()
+      and hm.role = 'owner'
+  ) then
+    raise exception 'Only owner can create invites';
+  end if;
+
+  out_code := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10));
+  insert into public.household_invites(code, household_id, created_by)
+  values (out_code, target_household_id, auth.uid());
+  return out_code;
+end;
+$$;
+
+grant execute on function public.create_household_invite(uuid) to authenticated;
+
+-- accept invite code and join household as editor
+create or replace function public.accept_household_invite(invite_code text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target_household uuid;
+begin
+  select household_id into target_household
+  from public.household_invites hi
+  where hi.code = upper(trim(invite_code))
+    and hi.used_at is null
+    and hi.expires_at > now();
+
+  if target_household is null then
+    raise exception 'Invite code is invalid or expired';
+  end if;
+
+  insert into public.household_members(household_id, user_id, role)
+  values (target_household, auth.uid(), 'editor')
+  on conflict (household_id, user_id) do nothing;
+
+  update public.household_invites
+  set used_by = auth.uid(), used_at = now()
+  where code = upper(trim(invite_code));
+end;
+$$;
+
+grant execute on function public.accept_household_invite(text) to authenticated;
+
+-- Conflict-safe quantity update
+create or replace function public.adjust_inventory_qty(target_item_id uuid, target_household_id uuid, qty_delta numeric)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.can_write_household(target_household_id) then
+    raise exception 'No write access for household';
+  end if;
+
+  update public.inventory_items
+  set quantity = greatest(0, quantity + qty_delta),
+      updated_by = auth.uid(),
+      updated_at = now()
+  where id = target_item_id
+    and household_id = target_household_id;
+
+  if not found then
+    raise exception 'Item not found';
+  end if;
+end;
+$$;
+
+grant execute on function public.adjust_inventory_qty(uuid, uuid, numeric) to authenticated;

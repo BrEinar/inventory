@@ -137,6 +137,7 @@
         <label>Username<input id="loginUser" autocomplete="username" /></label>
         <label>Password<input id="loginPass" type="password" autocomplete="current-password" /></label>
         <button id="loginBtn" class="primary">Login</button>
+        <button id="resetPasswordBtn">Send password reset email</button>
       </div>
 
       <div id="signupPanel" class="grid hidden">
@@ -366,6 +367,20 @@
       <button id="buildShoppingBtn" class="primary">Build missing shopping list</button>
     </div>
     <div id="shoppingList" class="grid" style="margin-top:10px;"></div>
+
+    <div class="card" style="margin-top:12px;">
+      <h3 style="margin:0 0 8px;">👨‍👩‍👧 Household sharing</h3>
+      <div class="row">
+        <button id="createInviteBtn">Create invite code</button>
+        <label>
+          Invite code
+          <input id="inviteCode" placeholder="Paste code" autocomplete="off" />
+        </label>
+        <button id="acceptInviteBtn">Join household</button>
+      </div>
+      <div id="inviteStatus" class="muted small" style="margin-top:8px;"></div>
+      <div id="membersList" class="grid" style="margin-top:8px;"></div>
+    </div>
   </div>
   </section>
 
@@ -406,6 +421,7 @@
     loginUser: $("loginUser"),
     loginPass: $("loginPass"),
     loginBtn: $("loginBtn"),
+    resetPasswordBtn: $("resetPasswordBtn"),
     signupUser: $("signupUser"),
     signupPass: $("signupPass"),
     signupPass2: $("signupPass2"),
@@ -467,6 +483,11 @@
     planEntries: $("planEntries"),
     buildShoppingBtn: $("buildShoppingBtn"),
     shoppingList: $("shoppingList"),
+    createInviteBtn: $("createInviteBtn"),
+    inviteCode: $("inviteCode"),
+    acceptInviteBtn: $("acceptInviteBtn"),
+    inviteStatus: $("inviteStatus"),
+    membersList: $("membersList"),
 
     tabInventory: $("tabInventory"),
     tabRecipes: $("tabRecipes"),
@@ -490,6 +511,7 @@
   let shoppingListItems = [];
   let cloudSyncInFlight = false;
   let cloudSyncQueued = false;
+  let cloudChannels = [];
 
   function getCloudConfig() {
     try {
@@ -738,6 +760,125 @@
     }
   }
 
+
+
+  function setInviteStatus(message, isError = false) {
+    if (!els.inviteStatus) return;
+    els.inviteStatus.textContent = message || "";
+    els.inviteStatus.style.color = isError ? "#ef4444" : "";
+  }
+
+  async function loadHouseholdMembers() {
+    if (!usingCloudAuth || !supabaseClient || !els.membersList) return;
+    try {
+      const householdId = await ensureCloudHouseholdId();
+      if (!householdId) return;
+      const { data, error } = await supabaseClient
+        .from("household_members")
+        .select("id,user_id,role")
+        .eq("household_id", householdId)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      els.membersList.innerHTML = "";
+      const members = data || [];
+      if (!members.length) {
+        els.membersList.innerHTML = '<div class="muted small">No members yet.</div>';
+        return;
+      }
+      for (const m of members) {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `<div><code>${escapeHtml(m.user_id)}</code> <span class="pill">${escapeHtml(m.role)}</span></div>`;
+        els.membersList.appendChild(row);
+      }
+    } catch (e) {
+      setInviteStatus(`Could not load household members: ${e?.message || e}`, true);
+    }
+  }
+
+  async function createInviteCode() {
+    if (!usingCloudAuth || !supabaseClient) return;
+    try {
+      const householdId = await ensureCloudHouseholdId();
+      if (!householdId) return;
+      const { data, error } = await supabaseClient.rpc("create_household_invite", { target_household_id: householdId });
+      if (error) throw error;
+      els.inviteCode.value = String(data || "");
+      setInviteStatus("Invite code created. Share it with a household member.");
+    } catch (e) {
+      setInviteStatus(`Could not create invite code: ${e?.message || e}`, true);
+    }
+  }
+
+  async function acceptInviteCode() {
+    if (!usingCloudAuth || !supabaseClient) return;
+    const code = String(els.inviteCode.value || "").trim();
+    if (!code) {
+      setInviteStatus("Paste an invite code first.", true);
+      return;
+    }
+    try {
+      const { error } = await supabaseClient.rpc("accept_household_invite", { invite_code: code });
+      if (error) throw error;
+      cloudHouseholdId = null;
+      await refreshAfterStateLoad();
+      await startCloudRealtime();
+      await loadHouseholdMembers();
+      setInviteStatus("Invite accepted. Household switched.");
+    } catch (e) {
+      setInviteStatus(`Could not accept invite code: ${e?.message || e}`, true);
+    }
+  }
+
+  async function sendPasswordReset() {
+    if (!supabaseClient) {
+      setAuthStatus("Password reset requires cloud auth configuration.", true);
+      return;
+    }
+    const email = els.loginUser.value.trim();
+    if (!email) {
+      setAuthStatus("Enter your email/username first.", true);
+      return;
+    }
+    const { error } = await supabaseClient.auth.resetPasswordForEmail(email);
+    if (error) throw error;
+    setAuthStatus("If this account exists, a reset email was sent.");
+  }
+
+  async function stopCloudRealtime() {
+    for (const channel of cloudChannels) {
+      try { await supabaseClient.removeChannel(channel); } catch {}
+    }
+    cloudChannels = [];
+  }
+
+  async function startCloudRealtime() {
+    if (!usingCloudAuth || !supabaseClient) return;
+    await stopCloudRealtime();
+    const householdId = await ensureCloudHouseholdId();
+    if (!householdId) return;
+    const events = [
+      { table: "inventory_items", schema: "public", filter: `household_id=eq.${householdId}` },
+      { table: "shopping_list_items", schema: "public", filter: `household_id=eq.${householdId}` },
+    ];
+    for (const evt of events) {
+      const channel = supabaseClient.channel(`rt:${evt.table}:${householdId}`)
+        .on("postgres_changes", { event: "*", ...evt }, async () => {
+          try {
+            const cloud = await loadCloudState();
+            if (!cloud) return;
+            items = cloud.items;
+            recipes = cloud.recipes;
+            mealPlan = { start: mealPlan.start || "", days: mealPlan.days || 7, entries: cloud.entries };
+            shoppingListItems = cloud.shopping;
+            render();
+          } catch {}
+        })
+        .subscribe();
+      cloudChannels.push(channel);
+    }
+  }
+
   function getAuthRecords() {
     try {
       const parsed = JSON.parse(localStorage.getItem(AUTH_USERS_KEY) || "{}");
@@ -880,6 +1021,8 @@
     els.authWrap.classList.add("hidden");
     els.app.classList.remove("hidden");
     render();
+    await startCloudRealtime();
+    await loadHouseholdMembers();
     return true;
   }
 
@@ -951,6 +1094,8 @@
       els.authWrap.classList.add("hidden");
       els.app.classList.remove("hidden");
       render();
+      await startCloudRealtime();
+      await loadHouseholdMembers();
       return;
     }
     const records = getAuthRecord() || {};
@@ -984,6 +1129,7 @@
 
   async function logout() {
     if (supabaseClient && usingCloudAuth) {
+      await stopCloudRealtime();
       await supabaseClient.auth.signOut();
     }
     currentUser = null;
@@ -999,6 +1145,8 @@
     setAuthView("login");
     setAuthStatus(supabaseClient ? "Signed out." : "");
     els.loginPass.value = "";
+    if (els.membersList) els.membersList.innerHTML = "";
+    setInviteStatus("");
   }
 
   function makeBestBeforeDates(qty, dateValue = "") {
@@ -1137,7 +1285,29 @@
   }
 
   function editToForm(id) { const it = items.find(x => x.id === id); if (!it) return; editingId = id; els.name.value = it.name; els.sku.value = it.sku; els.qty.value = String(it.qty); els.unitValue.value = String(it.unitValue || 0); els.unitType.value = it.unitType || ""; els.loc.value = it.loc; els.min.value = String(it.min); els.bestBefore.value = it.bestBeforeDates.find(Boolean) || ""; els.notes.value = it.notes; window.scrollTo({ top: 0, behavior: "smooth" }); els.name.focus(); }
-  function adjustQty(id, delta) { const it = items.find(x => x.id === id); if (!it) return; it.qty = clampInt(it.qty + delta); it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, it.qty, ""); it.updatedAt = nowISO(); render(); }
+  async function adjustQty(id, delta) {
+    const it = items.find(x => x.id === id);
+    if (!it) return;
+    if (usingCloudAuth && supabaseClient) {
+      try {
+        const householdId = await ensureCloudHouseholdId();
+        if (!householdId) return;
+        const { error } = await supabaseClient.rpc("adjust_inventory_qty", {
+          target_item_id: id,
+          target_household_id: householdId,
+          qty_delta: Number(delta),
+        });
+        if (error) throw error;
+      } catch (e) {
+        alert(`Could not update quantity: ${e?.message || e}`);
+        return;
+      }
+    }
+    it.qty = clampInt(it.qty + delta);
+    it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, it.qty, "");
+    it.updatedAt = nowISO();
+    render();
+  }
   function editBestBeforeDates(id) { const it = items.find(x => x.id === id); if (!it) return; editingBestBeforeId = id; els.bestBeforeMeta.textContent = `${it.name || "(unnamed)"} • Qty: ${it.qty}`; els.bestBeforeInputs.innerHTML = ""; for (let i = 0; i < it.qty; i++) { const row = document.createElement("label"); row.innerHTML = `Unit ${i + 1}<input type="date" data-best-before-index="${i}" value="${escapeHtml(it.bestBeforeDates?.[i] || "")}" />`; els.bestBeforeInputs.appendChild(row);} openDialog(els.bestBeforeDialog); }
   function saveBestBeforeDates() { const it = items.find(x => x.id === editingBestBeforeId); if (!it) return; const inputs = [...els.bestBeforeInputs.querySelectorAll("input[data-best-before-index]")]; it.bestBeforeDates = inputs.sort((a,b)=>Number(a.dataset.bestBeforeIndex)-Number(b.dataset.bestBeforeIndex)).map(input => String(input.value || "").trim()); it.updatedAt = nowISO(); editingBestBeforeId = null; closeDialog(els.bestBeforeDialog); render(); }
   function delItem(id) { const it = items.find(x => x.id === id); if (!it) return; if (!confirm(`Delete "${it.name || it.sku || "item"}"?`)) return; items = items.filter(x => x.id !== id); if (editingId === id) editingId = null; render(); }
@@ -1394,6 +1564,7 @@ function addRecipeFromForm() {
   els.showSignup.addEventListener("click", () => setAuthView("signup"));
   els.signupBtn.addEventListener("click", () => signup().catch(() => setAuthStatus("Could not create account.", true)));
   els.loginBtn.addEventListener("click", () => login().catch(() => setAuthStatus("Login failed.", true)));
+  els.resetPasswordBtn.addEventListener("click", () => sendPasswordReset().catch(() => setAuthStatus("Could not send reset email.", true)));
   [els.loginPass, els.loginUser].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") login().catch(() => setAuthStatus("Login failed.", true)); }));
   [els.signupPass, els.signupPass2, els.signupUser].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") signup().catch(() => setAuthStatus("Could not create account.", true)); }));
 
@@ -1410,7 +1581,7 @@ function addRecipeFromForm() {
   els.stopScan.addEventListener("click", stopScan);
   els.scanDialog.addEventListener("close", stopScan);
   els.scanDialog.addEventListener("cancel", (e) => { e.preventDefault(); stopScan(); });
-  els.rows.addEventListener("click", (e) => { const btn = e.target.closest("button[data-act]"); if (!btn) return; const id = btn.dataset.id; const act = btn.dataset.act; if (act === "edit") editToForm(id); if (act === "dates") editBestBeforeDates(id); if (act === "plus") adjustQty(id, 1); if (act === "minus") adjustQty(id, -1); if (act === "del") delItem(id); });
+  els.rows.addEventListener("click", (e) => { const btn = e.target.closest("button[data-act]"); if (!btn) return; const id = btn.dataset.id; const act = btn.dataset.act; if (act === "edit") editToForm(id); if (act === "dates") editBestBeforeDates(id); if (act === "plus") adjustQty(id, 1).catch(() => {}); if (act === "minus") adjustQty(id, -1).catch(() => {}); if (act === "del") delItem(id); });
   [els.search, els.lowFilter, els.sort].forEach(el => { el.addEventListener("input", render); el.addEventListener("change", render); });
   els.exportJson.addEventListener("click", exportJSON);
   els.exportCsv.addEventListener("click", exportCSV);
@@ -1426,6 +1597,8 @@ function addRecipeFromForm() {
   els.addRecipeBtn.addEventListener("click", addRecipeFromForm);
   els.addPlanEntryBtn.addEventListener("click", addPlanEntry);
   els.buildShoppingBtn.addEventListener("click", buildShoppingList);
+  els.createInviteBtn.addEventListener("click", () => createInviteCode().catch(() => setInviteStatus("Could not create invite code.", true)));
+  els.acceptInviteBtn.addEventListener("click", () => acceptInviteCode().catch(() => setInviteStatus("Could not accept invite code.", true)));
   els.recipeList.addEventListener("click", (e) => { const btn = e.target.closest("button[data-recipe-del]"); if (!btn) return; const id = btn.dataset.recipeDel; recipes = recipes.filter(r => r.id !== id); mealPlan.entries = mealPlan.entries.filter(x => x.recipeId !== id); render(); });
   els.planEntries.addEventListener("click", (e) => { const btn = e.target.closest("button[data-plan-del]"); if (!btn) return; const id = btn.dataset.planDel; mealPlan.entries = mealPlan.entries.filter(x => x.id !== id); render(); });
   [els.planStart, els.planDays].forEach(el => el.addEventListener("change", () => { mealPlan.start = els.planStart.value; mealPlan.days = Math.max(1, clampInt(els.planDays.value)); save().catch(() => {}); }));
