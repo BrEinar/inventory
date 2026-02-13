@@ -486,6 +486,10 @@
   let activeTab = "inventory";
   let supabaseClient = null;
   let usingCloudAuth = false;
+  let cloudHouseholdId = null;
+  let shoppingListItems = [];
+  let cloudSyncInFlight = false;
+  let cloudSyncQueued = false;
 
   function getCloudConfig() {
     try {
@@ -604,6 +608,136 @@
     return { id: String(x.id ?? crypto.randomUUID()), recipeId, servings: Math.max(1, clampInt(x.servings ?? 1)), date };
   }
 
+  function normalizeShoppingItem(x) {
+    if (!x) return null;
+    const name = String(x.name ?? "").trim();
+    if (!name) return null;
+    return {
+      id: String(x.id ?? crypto.randomUUID()),
+      name,
+      amount: clampFloat(x.amount ?? 0),
+      unit: String(x.unit ?? "pcs").trim().toLowerCase() || "pcs",
+      kind: String(x.kind ?? "count").trim().toLowerCase() || "count",
+    };
+  }
+
+  async function ensureCloudHouseholdId() {
+    if (!usingCloudAuth || !supabaseClient) return null;
+    if (cloudHouseholdId) return cloudHouseholdId;
+    const { data: userRes } = await supabaseClient.auth.getUser();
+    const userId = userRes?.user?.id;
+    if (!userId) return null;
+    const existing = await supabaseClient
+      .from("household_members")
+      .select("household_id")
+      .eq("user_id", userId)
+      .limit(1)
+      .maybeSingle();
+    if (existing.data?.household_id) {
+      cloudHouseholdId = existing.data.household_id;
+      return cloudHouseholdId;
+    }
+    const created = await supabaseClient
+      .from("households")
+      .insert({ name: "My household" })
+      .select("id")
+      .single();
+    if (created.error || !created.data?.id) throw created.error || new Error("Could not create household.");
+    const householdId = created.data.id;
+    const memberInsert = await supabaseClient.from("household_members").insert({
+      household_id: householdId,
+      user_id: userId,
+      role: "owner",
+    });
+    if (memberInsert.error) throw memberInsert.error;
+    cloudHouseholdId = householdId;
+    return cloudHouseholdId;
+  }
+
+  async function loadCloudState() {
+    const householdId = await ensureCloudHouseholdId();
+    if (!householdId) return null;
+    const [inv, rec, plan, shop] = await Promise.all([
+      supabaseClient.from("inventory_items").select("id,name,sku,qty,unit_value,unit_type,loc,min,best_before_dates,notes,updated_at").eq("household_id", householdId),
+      supabaseClient.from("recipes").select("id,name,servings,ingredients,updated_at").eq("household_id", householdId),
+      supabaseClient.from("meal_plan_entries").select("id,recipe_id,servings,date").eq("household_id", householdId),
+      supabaseClient.from("shopping_list_items").select("id,name,amount,unit,kind").eq("household_id", householdId),
+    ]);
+    if (inv.error || rec.error || plan.error || shop.error) throw inv.error || rec.error || plan.error || shop.error;
+    return {
+      items: (inv.data || []).map((x) => normalizeItem({ ...x, unitValue: x.unit_value, unitType: x.unit_type, bestBeforeDates: x.best_before_dates, updatedAt: x.updated_at })).filter(Boolean),
+      recipes: (rec.data || []).map((x) => normalizeRecipe({ ...x, updatedAt: x.updated_at })).filter(Boolean),
+      entries: (plan.data || []).map((x) => normalizePlanEntry({ ...x, recipeId: x.recipe_id })).filter(Boolean),
+      shopping: (shop.data || []).map(normalizeShoppingItem).filter(Boolean),
+    };
+  }
+
+  async function replaceCloudTable(table, rows, householdId) {
+    const clear = await supabaseClient.from(table).delete().eq("household_id", householdId);
+    if (clear.error) throw clear.error;
+    if (!rows.length) return;
+    const insert = await supabaseClient.from(table).insert(rows);
+    if (insert.error) throw insert.error;
+  }
+
+  async function syncCloudState() {
+    if (!usingCloudAuth || !supabaseClient || !currentUser) return;
+    if (cloudSyncInFlight) {
+      cloudSyncQueued = true;
+      return;
+    }
+    cloudSyncInFlight = true;
+    try {
+      const householdId = await ensureCloudHouseholdId();
+      if (!householdId) return;
+      await Promise.all([
+        replaceCloudTable("inventory_items", items.map((it) => ({
+          id: it.id,
+          household_id: householdId,
+          name: it.name,
+          sku: it.sku,
+          qty: it.qty,
+          unit_value: it.unitValue,
+          unit_type: it.unitType,
+          loc: it.loc,
+          min: it.min,
+          best_before_dates: it.bestBeforeDates,
+          notes: it.notes,
+          updated_at: it.updatedAt,
+        })), householdId),
+        replaceCloudTable("recipes", recipes.map((r) => ({
+          id: r.id,
+          household_id: householdId,
+          name: r.name,
+          servings: r.servings,
+          ingredients: r.ingredients,
+          updated_at: r.updatedAt,
+        })), householdId),
+        replaceCloudTable("meal_plan_entries", mealPlan.entries.map((entry) => ({
+          id: entry.id,
+          household_id: householdId,
+          recipe_id: entry.recipeId,
+          servings: entry.servings,
+          date: entry.date || null,
+        })), householdId),
+        replaceCloudTable("shopping_list_items", shoppingListItems.map((entry) => ({
+          id: entry.id,
+          household_id: householdId,
+          name: entry.name,
+          amount: entry.amount,
+          unit: entry.unit,
+          kind: entry.kind,
+        })), householdId),
+      ]);
+    } finally {
+      cloudSyncInFlight = false;
+      if (cloudSyncQueued) {
+        cloudSyncQueued = false;
+        syncCloudState().catch(() => {});
+      }
+    }
+  }
+
   function getAuthRecords() {
     try {
       const parsed = JSON.parse(localStorage.getItem(AUTH_USERS_KEY) || "{}");
@@ -653,13 +787,14 @@
   async function save() {
     if (!currentUser) return;
     if (usingCloudAuth) {
-      const payload = { version: 2, items, recipes, mealPlan };
+      const payload = { version: 2, items, recipes, mealPlan, shoppingListItems };
       localStorage.setItem(getCloudCacheKey(), JSON.stringify(payload));
+      syncCloudState().catch(() => {});
       return;
     }
     if (!sessionKey) return;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const payload = { version: 2, items, recipes, mealPlan };
+    const payload = { version: 2, items, recipes, mealPlan, shoppingListItems };
     const plain = new TextEncoder().encode(JSON.stringify(payload));
     const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, sessionKey, plain);
     localStorage.setItem(ENC_KEY_PREFIX + currentUser, JSON.stringify({ iv: b64FromBytes(iv), data: b64FromBytes(cipher) }));
@@ -668,33 +803,46 @@
   async function load() {
     if (usingCloudAuth) {
       try {
+        const cloud = await loadCloudState();
+        if (cloud) {
+          return {
+            items: cloud.items,
+            recipes: cloud.recipes,
+            mealPlan: { start: "", days: 7, entries: cloud.entries },
+            shoppingListItems: cloud.shopping,
+          };
+        }
+      } catch {}
+      try {
         const raw = localStorage.getItem(getCloudCacheKey());
-        if (!raw) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+        if (!raw) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] }, shoppingListItems: [] };
         const parsed = JSON.parse(raw);
         const loadedItems = Array.isArray(parsed?.items) ? parsed.items.map(normalizeItem).filter(Boolean) : [];
         const loadedRecipes = Array.isArray(parsed?.recipes) ? parsed.recipes.map(normalizeRecipe).filter(Boolean) : [];
         const loadedPlan = parsed?.mealPlan || {};
         const entries = Array.isArray(loadedPlan.entries) ? loadedPlan.entries.map(normalizePlanEntry).filter(Boolean) : [];
-        return { items: loadedItems, recipes: loadedRecipes, mealPlan: { start: String(loadedPlan.start ?? ""), days: Math.max(1, clampInt(loadedPlan.days ?? 7)), entries } };
+        const loadedShopping = Array.isArray(parsed?.shoppingListItems) ? parsed.shoppingListItems.map(normalizeShoppingItem).filter(Boolean) : [];
+        return { items: loadedItems, recipes: loadedRecipes, mealPlan: { start: String(loadedPlan.start ?? ""), days: Math.max(1, clampInt(loadedPlan.days ?? 7)), entries }, shoppingListItems: loadedShopping };
       } catch {
-        return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+        return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] }, shoppingListItems: [] };
       }
     }
     const encRaw = localStorage.getItem(ENC_KEY_PREFIX + currentUser);
     if (!encRaw) {
       const legacyRaw = localStorage.getItem(STORAGE_KEY);
-      if (!legacyRaw) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+      if (!legacyRaw) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] }, shoppingListItems: [] };
       try {
         const parsed = JSON.parse(legacyRaw);
-        if (!Array.isArray(parsed)) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+        if (!Array.isArray(parsed)) return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] }, shoppingListItems: [] };
         const migrated = parsed.map(normalizeItem).filter(Boolean);
         items = migrated;
         recipes = [];
         mealPlan = { start: "", days: 7, entries: [] };
+        shoppingListItems = [];
         await save();
         localStorage.removeItem(STORAGE_KEY);
-        return { items: migrated, recipes: [], mealPlan };
-      } catch { return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } }; }
+        return { items: migrated, recipes: [], mealPlan, shoppingListItems: [] };
+      } catch { return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] }, shoppingListItems: [] }; }
     }
 
     try {
@@ -704,15 +852,16 @@
       const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, sessionKey, data);
       const parsed = JSON.parse(new TextDecoder().decode(plain));
       if (Array.isArray(parsed)) {
-        return { items: parsed.map(normalizeItem).filter(Boolean), recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+        return { items: parsed.map(normalizeItem).filter(Boolean), recipes: [], mealPlan: { start: "", days: 7, entries: [] }, shoppingListItems: [] };
       }
       const loadedItems = Array.isArray(parsed?.items) ? parsed.items.map(normalizeItem).filter(Boolean) : [];
       const loadedRecipes = Array.isArray(parsed?.recipes) ? parsed.recipes.map(normalizeRecipe).filter(Boolean) : [];
       const loadedPlan = parsed?.mealPlan || {};
       const entries = Array.isArray(loadedPlan.entries) ? loadedPlan.entries.map(normalizePlanEntry).filter(Boolean) : [];
-      return { items: loadedItems, recipes: loadedRecipes, mealPlan: { start: String(loadedPlan.start ?? ""), days: Math.max(1, clampInt(loadedPlan.days ?? 7)), entries } };
+      const loadedShopping = Array.isArray(parsed?.shoppingListItems) ? parsed.shoppingListItems.map(normalizeShoppingItem).filter(Boolean) : [];
+      return { items: loadedItems, recipes: loadedRecipes, mealPlan: { start: String(loadedPlan.start ?? ""), days: Math.max(1, clampInt(loadedPlan.days ?? 7)), entries }, shoppingListItems: loadedShopping };
     } catch {
-      return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] } };
+      return { items: [], recipes: [], mealPlan: { start: "", days: 7, entries: [] }, shoppingListItems: [] };
     }
   }
 
@@ -727,6 +876,7 @@
     items = loaded.items;
     recipes = loaded.recipes;
     mealPlan = loaded.mealPlan;
+    shoppingListItems = loaded.shoppingListItems || [];
     els.authWrap.classList.add("hidden");
     els.app.classList.remove("hidden");
     render();
@@ -797,6 +947,7 @@
       items = loaded.items;
       recipes = loaded.recipes;
       mealPlan = loaded.mealPlan;
+      shoppingListItems = loaded.shoppingListItems || [];
       els.authWrap.classList.add("hidden");
       els.app.classList.remove("hidden");
       render();
@@ -823,6 +974,7 @@
     items = loaded.items;
     recipes = loaded.recipes;
     mealPlan = loaded.mealPlan;
+    shoppingListItems = loaded.shoppingListItems || [];
     els.authWrap.classList.add("hidden");
     els.app.classList.remove("hidden");
     render();
@@ -840,6 +992,8 @@
     items = [];
     recipes = [];
     mealPlan = { start: "", days: 7, entries: [] };
+    shoppingListItems = [];
+    cloudHouseholdId = null;
     els.app.classList.add("hidden");
     els.authWrap.classList.remove("hidden");
     setAuthView("login");
@@ -930,6 +1084,7 @@
     }
     renderRecipes();
     renderMealPlan();
+    renderShoppingList();
     save().catch(() => {});
   }
 
@@ -1103,6 +1258,21 @@ function addRecipeFromForm() {
     return { amount, kind: "count", unit: u };
   }
 
+  function renderShoppingList() {
+    els.shoppingList.innerHTML = "";
+    if (!shoppingListItems.length) {
+      els.shoppingList.innerHTML = `<div class="pill">Everything needed is already in inventory 🎉</div>`;
+      return;
+    }
+    for (const m of shoppingListItems.slice().sort((a,b) => a.name.localeCompare(b.name))) {
+      const amount = (m.unit === "g" && m.amount >= 1000) ? `${(m.amount/1000).toFixed(2).replace(/\.00$/, "")} kg` : (m.unit === "ml" && m.amount >= 1000) ? `${(m.amount/1000).toFixed(2).replace(/\.00$/, "")} l` : `${Number.isInteger(m.amount) ? m.amount : m.amount.toFixed(2)} ${m.unit || "pcs"}`;
+      const div = document.createElement("div");
+      div.className = "card";
+      div.textContent = `${m.name}: ${amount}`;
+      els.shoppingList.appendChild(div);
+    }
+  }
+
   function buildShoppingList() {
     mealPlan.start = els.planStart.value;
     mealPlan.days = Math.max(1, clampInt(els.planDays.value));
@@ -1132,25 +1302,16 @@ function addRecipeFromForm() {
       available.get(key).amount += base.amount;
     }
 
-    els.shoppingList.innerHTML = "";
     const missing = [];
     for (const [key, req] of required.entries()) {
       const have = available.get(key);
       const haveAmount = have && have.kind === req.kind ? have.amount : 0;
       const miss = Math.max(0, req.amount - haveAmount);
-      if (miss > 0) missing.push({ name: req.name, amount: miss, unit: req.unit, kind: req.kind });
+      if (miss > 0) missing.push(normalizeShoppingItem({ id: crypto.randomUUID(), name: req.name, amount: miss, unit: req.unit, kind: req.kind }));
     }
-    if (!missing.length) {
-      els.shoppingList.innerHTML = `<div class="pill">Everything needed is already in inventory 🎉</div>`;
-      return;
-    }
-    for (const m of missing.sort((a,b) => a.name.localeCompare(b.name))) {
-      const amount = (m.unit === "g" && m.amount >= 1000) ? `${(m.amount/1000).toFixed(2).replace(/\.00$/, "")} kg` : (m.unit === "ml" && m.amount >= 1000) ? `${(m.amount/1000).toFixed(2).replace(/\.00$/, "")} l` : `${Number.isInteger(m.amount) ? m.amount : m.amount.toFixed(2)} ${m.unit || "pcs"}`;
-      const div = document.createElement("div");
-      div.className = "card";
-      div.textContent = `${m.name}: ${amount}`;
-      els.shoppingList.appendChild(div);
-    }
+    shoppingListItems = missing.filter(Boolean);
+    renderShoppingList();
+    save().catch(() => {});
   }
 
   let codeReader = null;

@@ -116,11 +116,11 @@ Use this as a working task board. Each task maps directly to the plan points abo
 
 ### Phase 2 (Week 2): sync app screens
 
-- [ ] **Task 2.1 — Replace local-only reads/writes with cloud reads/writes.**
-  - [ ] Migrate inventory CRUD operations to backend APIs.
-  - [ ] Migrate recipe CRUD operations to backend APIs.
-  - [ ] Migrate meal plan CRUD operations to backend APIs.
-  - [ ] Migrate shopping list CRUD operations to backend APIs.
+- [x] **Task 2.1 — Replace local-only reads/writes with cloud reads/writes.**
+  - [x] Migrate inventory CRUD operations to backend APIs.
+  - [x] Migrate recipe CRUD operations to backend APIs.
+  - [x] Migrate meal plan CRUD operations to backend APIs.
+  - [x] Migrate shopping list CRUD operations to backend APIs.
 
 - [ ] **Task 2.2 — Keep local cache for better UX.**
   - [ ] Add cache layer keyed by `household_id`.
