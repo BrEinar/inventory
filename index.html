@@ -509,7 +509,16 @@
 
   // --- Barcode scanning (ZXing) ---
   let codeReader = null;
-  let stopScanFn = null;
+
+  function openDialog(el) {
+    if (typeof el.showModal === "function") el.showModal();
+    else el.setAttribute("open", "");
+  }
+
+  function closeDialog(el) {
+    if (typeof el.close === "function") el.close();
+    else el.removeAttribute("open");
+  }
 
   async function startScan() {
     // Camera requires secure context. localhost over http is allowed in Chrome.
@@ -527,9 +536,101 @@
     }
 
     els.scanStatus.textContent = "Starting camera…";
-    els.scanDialog.showModal();
+    openDialog(els.scanDialog);
 
     codeReader = new ZXing.BrowserMultiFormatReader();
     try {
       // Prefer rear camera if available
-      const constraints = { video: { facing
+      const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
+      await codeReader.decodeFromConstraints(constraints, els.video, (result, err) => {
+        if (result?.text) {
+          const value = result.text.trim();
+          els.sku.value = value;
+          els.scanStatus.textContent = `Scanned: ${value}`;
+          stopScan();
+          els.sku.focus();
+          return;
+        }
+        if (!err) return;
+        if (err.name === "NotFoundException") {
+          els.scanStatus.textContent = "Scanning…";
+          return;
+        }
+        els.scanStatus.textContent = `Scanner error: ${err.message || err.name || "Unknown error"}`;
+      });
+    } catch (e) {
+      els.scanStatus.textContent = `Could not start camera: ${e?.message || e}`;
+    }
+  }
+
+  function stopScan() {
+    try { codeReader?.reset(); } catch {}
+    codeReader = null;
+
+    try {
+      const stream = els.video.srcObject;
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      els.video.srcObject = null;
+    } catch {}
+
+    closeDialog(els.scanDialog);
+  }
+
+  // Form and table actions
+  els.addBtn.addEventListener("click", upsertFromForm);
+  [els.name, els.sku, els.qty, els.loc, els.min, els.notes].forEach((input) => {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") upsertFromForm();
+    });
+  });
+
+  els.scanBtn.addEventListener("click", startScan);
+  els.stopScan.addEventListener("click", stopScan);
+  els.scanDialog.addEventListener("close", stopScan);
+  els.scanDialog.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    stopScan();
+  });
+
+  els.rows.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const act = btn.dataset.act;
+    if (act === "edit") editToForm(id);
+    if (act === "plus") adjustQty(id, 1);
+    if (act === "minus") adjustQty(id, -1);
+    if (act === "del") delItem(id);
+  });
+
+  [els.search, els.lowFilter, els.sort].forEach(el => {
+    el.addEventListener("input", render);
+    el.addEventListener("change", render);
+  });
+
+  els.exportJson.addEventListener("click", exportJSON);
+  els.exportCsv.addEventListener("click", exportCSV);
+
+  els.importBtn.addEventListener("click", () => {
+    els.importText.value = "";
+    openDialog(els.importDialog);
+  });
+  els.closeImport.addEventListener("click", () => closeDialog(els.importDialog));
+  els.doImport.addEventListener("click", () => {
+    const res = importData(els.importText.value);
+    if (!res) return;
+    alert(res.msg);
+    if (res.ok) closeDialog(els.importDialog);
+  });
+
+  els.wipe.addEventListener("click", () => {
+    if (!confirm("Delete all inventory items on this device?")) return;
+    items = [];
+    render();
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
