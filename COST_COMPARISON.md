@@ -89,11 +89,11 @@ Use this as a working task board. Each task maps directly to the plan points abo
 
 ### Phase 1 (Week 1): shared account model
 
-- [ ] **Task 1.1 — Add cloud auth (email+password).**
-  - [ ] Choose provider config (project URL, anon/public key, auth settings).
-  - [ ] Implement sign up, sign in, sign out flows.
-  - [ ] Persist and restore authenticated session on app load.
-  - [ ] Add basic auth error handling and user-facing messages.
+- [x] **Task 1.1 — Add cloud auth (email+password).**
+  - [x] Choose provider config (project URL, anon/public key, auth settings).
+  - [x] Implement sign up, sign in, sign out flows.
+  - [x] Persist and restore authenticated session on app load.
+  - [x] Add basic auth error handling and user-facing messages.
 
 - [ ] **Task 1.2 — Create shared data tables.**
   - [ ] Create `households` table.
