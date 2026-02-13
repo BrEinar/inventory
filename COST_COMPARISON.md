@@ -108,11 +108,11 @@ Use this as a working task board. Each task maps directly to the plan points abo
   - [x] Add foreign keys and indexes for `household_id`.
   - [x] Backfill/default `household_id` strategy for existing data.
 
-- [ ] **Task 1.4 — Enforce household access policies.**
-  - [ ] Enable row-level security (or equivalent).
-  - [ ] Add read/write policies scoped to household membership.
-  - [ ] Validate role constraints (`owner`, `editor`, `viewer`) for write operations.
-  - [ ] Test unauthorized cross-household access is blocked.
+- [x] **Task 1.4 — Enforce household access policies.**
+  - [x] Enable row-level security (or equivalent).
+  - [x] Add read/write policies scoped to household membership.
+  - [x] Validate role constraints (`owner`, `editor`, `viewer`) for write operations.
+  - [x] Test unauthorized cross-household access is blocked.
 
 ### Phase 2 (Week 2): sync app screens
 
