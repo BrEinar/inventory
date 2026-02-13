@@ -151,3 +151,239 @@ create index if not exists shopping_list_items_household_id_idx
 -- alter table public.recipes alter column household_id set not null;
 -- alter table public.meal_plan_entries alter column household_id set not null;
 -- alter table public.shopping_list_items alter column household_id set not null;
+
+-- Task 1.4: Enforce household access policies (RLS)
+
+-- Enable RLS
+alter table public.households enable row level security;
+alter table public.household_members enable row level security;
+alter table public.inventory_items enable row level security;
+alter table public.recipes enable row level security;
+alter table public.meal_plan_entries enable row level security;
+alter table public.shopping_list_items enable row level security;
+
+-- Utility predicates used by policies.
+create or replace function public.is_household_member(target_household_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.household_members hm
+    where hm.household_id = target_household_id
+      and hm.user_id = auth.uid()
+  );
+$$;
+
+create or replace function public.can_write_household(target_household_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.household_members hm
+    where hm.household_id = target_household_id
+      and hm.user_id = auth.uid()
+      and hm.role in ('owner', 'editor')
+  );
+$$;
+
+-- Household visibility and owner-only updates.
+drop policy if exists households_select_member on public.households;
+create policy households_select_member
+  on public.households
+  for select
+  using (public.is_household_member(id));
+
+drop policy if exists households_insert_owner on public.households;
+create policy households_insert_owner
+  on public.households
+  for insert
+  with check (auth.uid() is not null);
+
+drop policy if exists households_update_owner on public.households;
+create policy households_update_owner
+  on public.households
+  for update
+  using (
+    exists (
+      select 1 from public.household_members hm
+      where hm.household_id = id
+        and hm.user_id = auth.uid()
+        and hm.role = 'owner'
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.household_members hm
+      where hm.household_id = id
+        and hm.user_id = auth.uid()
+        and hm.role = 'owner'
+    )
+  );
+
+-- Membership rows: members can view, owners manage membership.
+drop policy if exists household_members_select_member on public.household_members;
+create policy household_members_select_member
+  on public.household_members
+  for select
+  using (public.is_household_member(household_id));
+
+drop policy if exists household_members_owner_insert on public.household_members;
+create policy household_members_owner_insert
+  on public.household_members
+  for insert
+  with check (
+    exists (
+      select 1 from public.household_members hm
+      where hm.household_id = household_id
+        and hm.user_id = auth.uid()
+        and hm.role = 'owner'
+    )
+  );
+
+drop policy if exists household_members_owner_update on public.household_members;
+create policy household_members_owner_update
+  on public.household_members
+  for update
+  using (
+    exists (
+      select 1 from public.household_members hm
+      where hm.household_id = household_id
+        and hm.user_id = auth.uid()
+        and hm.role = 'owner'
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.household_members hm
+      where hm.household_id = household_id
+        and hm.user_id = auth.uid()
+        and hm.role = 'owner'
+    )
+  );
+
+drop policy if exists household_members_owner_delete on public.household_members;
+create policy household_members_owner_delete
+  on public.household_members
+  for delete
+  using (
+    exists (
+      select 1 from public.household_members hm
+      where hm.household_id = household_id
+        and hm.user_id = auth.uid()
+        and hm.role = 'owner'
+    )
+  );
+
+-- Shared entity policies. Members can read, owner/editor can write.
+drop policy if exists inventory_items_select_member on public.inventory_items;
+create policy inventory_items_select_member
+  on public.inventory_items
+  for select
+  using (public.is_household_member(household_id));
+
+drop policy if exists inventory_items_insert_writer on public.inventory_items;
+create policy inventory_items_insert_writer
+  on public.inventory_items
+  for insert
+  with check (public.can_write_household(household_id));
+
+drop policy if exists inventory_items_update_writer on public.inventory_items;
+create policy inventory_items_update_writer
+  on public.inventory_items
+  for update
+  using (public.can_write_household(household_id))
+  with check (public.can_write_household(household_id));
+
+drop policy if exists inventory_items_delete_writer on public.inventory_items;
+create policy inventory_items_delete_writer
+  on public.inventory_items
+  for delete
+  using (public.can_write_household(household_id));
+
+drop policy if exists recipes_select_member on public.recipes;
+create policy recipes_select_member
+  on public.recipes
+  for select
+  using (public.is_household_member(household_id));
+
+drop policy if exists recipes_insert_writer on public.recipes;
+create policy recipes_insert_writer
+  on public.recipes
+  for insert
+  with check (public.can_write_household(household_id));
+
+drop policy if exists recipes_update_writer on public.recipes;
+create policy recipes_update_writer
+  on public.recipes
+  for update
+  using (public.can_write_household(household_id))
+  with check (public.can_write_household(household_id));
+
+drop policy if exists recipes_delete_writer on public.recipes;
+create policy recipes_delete_writer
+  on public.recipes
+  for delete
+  using (public.can_write_household(household_id));
+
+drop policy if exists meal_plan_entries_select_member on public.meal_plan_entries;
+create policy meal_plan_entries_select_member
+  on public.meal_plan_entries
+  for select
+  using (public.is_household_member(household_id));
+
+drop policy if exists meal_plan_entries_insert_writer on public.meal_plan_entries;
+create policy meal_plan_entries_insert_writer
+  on public.meal_plan_entries
+  for insert
+  with check (public.can_write_household(household_id));
+
+drop policy if exists meal_plan_entries_update_writer on public.meal_plan_entries;
+create policy meal_plan_entries_update_writer
+  on public.meal_plan_entries
+  for update
+  using (public.can_write_household(household_id))
+  with check (public.can_write_household(household_id));
+
+drop policy if exists meal_plan_entries_delete_writer on public.meal_plan_entries;
+create policy meal_plan_entries_delete_writer
+  on public.meal_plan_entries
+  for delete
+  using (public.can_write_household(household_id));
+
+drop policy if exists shopping_list_items_select_member on public.shopping_list_items;
+create policy shopping_list_items_select_member
+  on public.shopping_list_items
+  for select
+  using (public.is_household_member(household_id));
+
+drop policy if exists shopping_list_items_insert_writer on public.shopping_list_items;
+create policy shopping_list_items_insert_writer
+  on public.shopping_list_items
+  for insert
+  with check (public.can_write_household(household_id));
+
+drop policy if exists shopping_list_items_update_writer on public.shopping_list_items;
+create policy shopping_list_items_update_writer
+  on public.shopping_list_items
+  for update
+  using (public.can_write_household(household_id))
+  with check (public.can_write_household(household_id));
+
+drop policy if exists shopping_list_items_delete_writer on public.shopping_list_items;
+create policy shopping_list_items_delete_writer
+  on public.shopping_list_items
+  for delete
+  using (public.can_write_household(household_id));
+
+-- Manual validation checklist for access controls:
+-- 1) As owner/editor of household A, verify CRUD succeeds in household A.
+-- 2) As viewer of household A, verify SELECT succeeds and write statements fail.
+-- 3) As member of household B only, verify household A rows are invisible.
