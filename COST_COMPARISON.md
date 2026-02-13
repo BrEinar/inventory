@@ -83,6 +83,80 @@ For a household inventory/meal-planning app, **Option A is the right starting po
 2. Add conflict-safe updates for quantities.
 3. Add backup/export and account recovery UX.
 
+## Implementation task checklist
+
+Use this as a working task board. Each task maps directly to the plan points above.
+
+### Phase 1 (Week 1): shared account model
+
+- [ ] **Task 1.1 — Add cloud auth (email+password).**
+  - [ ] Choose provider config (project URL, anon/public key, auth settings).
+  - [ ] Implement sign up, sign in, sign out flows.
+  - [ ] Persist and restore authenticated session on app load.
+  - [ ] Add basic auth error handling and user-facing messages.
+
+- [ ] **Task 1.2 — Create shared data tables.**
+  - [ ] Create `households` table.
+  - [ ] Create `household_members` table with roles: `owner`, `editor`, `viewer`.
+  - [ ] Create `inventory_items` table.
+  - [ ] Create `recipes` table.
+  - [ ] Create `meal_plan_entries` table.
+  - [ ] Create `shopping_list_items` table.
+
+- [ ] **Task 1.3 — Add `household_id` to shared entities.**
+  - [ ] Ensure every shared table includes `household_id`.
+  - [ ] Add foreign keys and indexes for `household_id`.
+  - [ ] Backfill/default `household_id` strategy for existing data.
+
+- [ ] **Task 1.4 — Enforce household access policies.**
+  - [ ] Enable row-level security (or equivalent).
+  - [ ] Add read/write policies scoped to household membership.
+  - [ ] Validate role constraints (`owner`, `editor`, `viewer`) for write operations.
+  - [ ] Test unauthorized cross-household access is blocked.
+
+### Phase 2 (Week 2): sync app screens
+
+- [ ] **Task 2.1 — Replace local-only reads/writes with cloud reads/writes.**
+  - [ ] Migrate inventory CRUD operations to backend APIs.
+  - [ ] Migrate recipe CRUD operations to backend APIs.
+  - [ ] Migrate meal plan CRUD operations to backend APIs.
+  - [ ] Migrate shopping list CRUD operations to backend APIs.
+
+- [ ] **Task 2.2 — Keep local cache for better UX.**
+  - [ ] Add cache layer keyed by `household_id`.
+  - [ ] Hydrate UI from cache first, then revalidate in background.
+  - [ ] Define cache invalidation strategy after mutations/realtime events.
+
+- [ ] **Task 2.3 — Enable realtime only for high-value updates.**
+  - [ ] Enable realtime for inventory quantity updates.
+  - [ ] Enable realtime for shopping list edits.
+  - [ ] Keep other entities on fetch/refresh to limit noise/cost.
+  - [ ] Verify multi-device updates appear promptly.
+
+- [ ] **Task 2.4 — Add invite flow for family members.**
+  - [ ] Add owner-only “invite member” UI.
+  - [ ] Generate/send invite links or codes.
+  - [ ] Implement invite acceptance and membership creation.
+  - [ ] Add member management view (role updates/removal).
+
+### Phase 3 (Week 3): household-ready polish
+
+- [ ] **Task 3.1 — Add activity metadata on key entities.**
+  - [ ] Add `updated_by` and `updated_at` fields where needed.
+  - [ ] Auto-populate metadata in write paths.
+  - [ ] Surface recent updates in UI where helpful.
+
+- [ ] **Task 3.2 — Add conflict-safe quantity updates.**
+  - [ ] Use atomic increment/decrement operations server-side.
+  - [ ] Add optimistic UI with rollback on conflict/failure.
+  - [ ] Test concurrent edits from two devices.
+
+- [ ] **Task 3.3 — Add backup/export and account recovery UX.**
+  - [ ] Provide household data export (CSV/JSON).
+  - [ ] Add import/restore path with validation.
+  - [ ] Add password reset/account recovery flow.
+  - [ ] Add user guidance for recovery and data safety.
+
 ---
 
 ## First 6-month budget expectation
