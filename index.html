@@ -39,7 +39,6 @@
     .small { font-size: 12px; }
     .nowrap { white-space: nowrap; }
 
-    /* scanner */
     #videoWrap { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid rgba(127,127,127,.25); }
     video { width: 100%; height: auto; display:block; }
     .scanBox {
@@ -53,7 +52,7 @@
 </head>
 <body>
   <h1>📦 Inventory</h1>
-  <div class="muted">Offline storage on this device. Camera scanning needs opening via http:// (see note below).</div>
+  <div class="muted">Offline storage on this device.</div>
 
   <div class="card">
     <div class="row">
@@ -91,9 +90,7 @@
     </div>
 
     <div class="muted small" style="margin-top:8px;">
-      Tip: SKU/barcode is the unique ID. Add the same SKU again to update the existing item.
-      <br/>
-      Camera note: open this page via <span class="pill">http://localhost…</span> (Termux method below) so the browser allows camera access.
+      Tip: SKU/barcode is the unique ID. Add or scan the same SKU again to increase quantity.
     </div>
   </div>
 
@@ -156,7 +153,7 @@
 
   <dialog id="scanDialog">
     <h3 style="margin:0 0 8px;">Scan barcode</h3>
-    <div class="muted small">Point the camera at a barcode (EAN/UPC/Code128/QR, etc.).</div>
+    <div class="muted small">Point at a barcode (EAN/UPC/Code128/QR, etc.).</div>
     <div style="margin-top:10px;" id="videoWrap">
       <video id="video" muted playsinline></video>
       <div class="scanBox"></div>
@@ -179,7 +176,6 @@
     </div>
   </dialog>
 
-  <!-- Online scanner library (ZXing) -->
   <script src="https://unpkg.com/@zxing/library@latest"></script>
 
 <script>
@@ -220,6 +216,7 @@
   };
 
   let items = load();
+  let editingId = null;
 
   function nowISO() { return new Date().toISOString(); }
   function clampInt(v) {
@@ -339,14 +336,16 @@
       it = normalizeItem({ id: crypto.randomUUID(), name, sku, qty, loc, min, notes, updatedAt: nowISO() });
       items.push(it);
     } else {
+      const isEditingThisItem = editingId && editingId === it.id;
       it.name = name || it.name;
-      it.qty = qty;
+      it.qty = isEditingThisItem ? qty : clampInt(it.qty + qty);
       it.loc = loc;
       it.min = min;
       it.notes = notes;
       it.updatedAt = nowISO();
     }
 
+    editingId = null;
     els.name.value = "";
     els.sku.value = "";
     els.qty.value = "1";
@@ -361,6 +360,7 @@
   function editToForm(id) {
     const it = items.find(x => x.id === id);
     if (!it) return;
+    editingId = id;
     els.name.value = it.name;
     els.sku.value = it.sku;
     els.qty.value = String(it.qty);
@@ -384,6 +384,7 @@
     if (!it) return;
     if (!confirm(`Delete "${it.name || it.sku || "item"}"?`)) return;
     items = items.filter(x => x.id !== id);
+    if (editingId === id) editingId = null;
     render();
   }
 
