@@ -38,6 +38,11 @@
     .actions { display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap; margin-top: 10px; }
     .small { font-size: 12px; }
     .nowrap { white-space: nowrap; }
+    .hidden { display: none !important; }
+    .auth-wrap { max-width: 460px; margin: 10vh auto 0; }
+    .auth-tabs { display:flex; gap:8px; margin-bottom: 12px; }
+    .auth-tabs button { flex:1; }
+    .status { min-height: 20px; }
 
     #videoWrap { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid rgba(127,127,127,.25); }
     video { width: 100%; height: auto; display:block; }
@@ -51,6 +56,33 @@
   </style>
 </head>
 <body>
+  <div id="authWrap" class="auth-wrap">
+    <h1>🔐 Inventory login</h1>
+    <div class="muted">Your inventory is encrypted on this device using your password.</div>
+    <div class="card" style="margin-top:10px;">
+      <div class="auth-tabs">
+        <button id="showLogin" class="primary">Login</button>
+        <button id="showSignup">Sign up</button>
+      </div>
+
+      <div id="loginPanel" class="grid">
+        <label>Username<input id="loginUser" autocomplete="username" /></label>
+        <label>Password<input id="loginPass" type="password" autocomplete="current-password" /></label>
+        <button id="loginBtn" class="primary">Login</button>
+      </div>
+
+      <div id="signupPanel" class="grid hidden">
+        <label>Username<input id="signupUser" autocomplete="username" /></label>
+        <label>Password<input id="signupPass" type="password" autocomplete="new-password" /></label>
+        <label>Confirm password<input id="signupPass2" type="password" autocomplete="new-password" /></label>
+        <button id="signupBtn" class="primary">Create account</button>
+      </div>
+
+      <div id="authStatus" class="muted small status"></div>
+    </div>
+  </div>
+
+  <main id="app" class="hidden">
   <h1>📦 Inventory</h1>
   <div class="muted">Offline storage on this device.</div>
 
@@ -200,9 +232,27 @@
 <script>
 (() => {
   const STORAGE_KEY = "inventory_v1";
+  const AUTH_KEY = "inventory_auth_v1";
+  const ENC_KEY_PREFIX = "inventory_encrypted_v1_";
+  const PBKDF2_ITERATIONS = 210000;
   const $ = (id) => document.getElementById(id);
 
   const els = {
+    app: $("app"),
+    authWrap: $("authWrap"),
+    authStatus: $("authStatus"),
+    showLogin: $("showLogin"),
+    showSignup: $("showSignup"),
+    loginPanel: $("loginPanel"),
+    signupPanel: $("signupPanel"),
+    loginUser: $("loginUser"),
+    loginPass: $("loginPass"),
+    loginBtn: $("loginBtn"),
+    signupUser: $("signupUser"),
+    signupPass: $("signupPass"),
+    signupPass2: $("signupPass2"),
+    signupBtn: $("signupBtn"),
+
     name: $("name"),
     sku: $("sku"),
     qty: $("qty"),
@@ -242,9 +292,11 @@
     saveBestBefore: $("saveBestBefore"),
   };
 
-  let items = load();
+  let items = [];
   let editingId = null;
   let editingBestBeforeId = null;
+  let currentUser = null;
+  let sessionKey = null;
 
   function nowISO() { return new Date().toISOString(); }
   function clampInt(v) {
@@ -252,15 +304,27 @@
     if (!Number.isFinite(n)) return 0;
     return Math.max(0, Math.round(n));
   }
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+  function fmtDate(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString();
+  }
+  function b64FromBytes(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf)));
+  }
+  function bytesFromB64(s) {
+    return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  }
+
   function normalizeItem(x) {
     if (!x) return null;
-    const incomingDates = Array.isArray(x.bestBeforeDates)
-      ? x.bestBeforeDates.map(d => String(d ?? "").trim()).filter(Boolean)
-      : [];
+    const incomingDates = Array.isArray(x.bestBeforeDates) ? x.bestBeforeDates.map(d => String(d ?? "").trim()).filter(Boolean) : [];
     const qty = clampInt(x.qty ?? 0);
     const bestBeforeDates = incomingDates.slice(0, qty);
     while (bestBeforeDates.length < qty) bestBeforeDates.push("");
-
     return {
       id: String(x.id ?? crypto.randomUUID()),
       name: String(x.name ?? "").trim(),
@@ -273,25 +337,126 @@
       updatedAt: String(x.updatedAt ?? nowISO()),
     };
   }
-  function load() {
+
+  async function deriveKeyMaterial(password) {
+    return crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits", "deriveKey"]);
+  }
+
+  async function deriveAuth(material, salt, iterations) {
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations, hash: "SHA-256" }, material, 256);
+    return new Uint8Array(bits);
+  }
+
+  async function deriveAesKey(material, salt, iterations) {
+    return crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  }
+
+  function getAuthRecord() {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
+      const parsed = JSON.parse(localStorage.getItem(AUTH_KEY) || "null");
+      if (!parsed || !parsed.username || !parsed.salt || !parsed.pwdHash) return null;
+      return parsed;
+    } catch { return null; }
+  }
+
+  function timingSafeEqual(a, b) {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= (a[i] ^ b[i]);
+    return diff === 0;
+  }
+
+  async function save() {
+    if (!sessionKey || !currentUser) return;
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plain = new TextEncoder().encode(JSON.stringify(items));
+    const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, sessionKey, plain);
+    localStorage.setItem(ENC_KEY_PREFIX + currentUser, JSON.stringify({ iv: b64FromBytes(iv), data: b64FromBytes(cipher) }));
+  }
+
+  async function load() {
+    const encRaw = localStorage.getItem(ENC_KEY_PREFIX + currentUser);
+    if (!encRaw) {
+      const legacyRaw = localStorage.getItem(STORAGE_KEY);
+      if (!legacyRaw) return [];
+      try {
+        const parsed = JSON.parse(legacyRaw);
+        if (!Array.isArray(parsed)) return [];
+        const migrated = parsed.map(normalizeItem).filter(Boolean);
+        items = migrated;
+        await save();
+        localStorage.removeItem(STORAGE_KEY);
+        return migrated;
+      } catch { return []; }
+    }
+
+    try {
+      const payload = JSON.parse(encRaw);
+      const iv = bytesFromB64(payload.iv);
+      const data = bytesFromB64(payload.data);
+      const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, sessionKey, data);
+      const parsed = JSON.parse(new TextDecoder().decode(plain));
       if (!Array.isArray(parsed)) return [];
       return parsed.map(normalizeItem).filter(Boolean);
-    } catch { return []; }
+    } catch {
+      return [];
+    }
   }
-  function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); }
-  function escapeHtml(s) {
-    return String(s ?? "").replace(/[&<>"']/g, c => ({
-      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-    }[c]));
+
+  function setAuthStatus(msg, bad = false) {
+    els.authStatus.textContent = msg;
+    els.authStatus.style.color = bad ? "#c00" : "";
   }
-  function fmtDate(iso) {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return "";
-    return d.toLocaleString();
+
+  function setAuthView(mode) {
+    const loginMode = mode === "login";
+    els.loginPanel.classList.toggle("hidden", !loginMode);
+    els.signupPanel.classList.toggle("hidden", loginMode);
+    els.showLogin.classList.toggle("primary", loginMode);
+    els.showSignup.classList.toggle("primary", !loginMode);
+    setAuthStatus("");
+  }
+
+  async function signup() {
+    const username = els.signupUser.value.trim();
+    const password = els.signupPass.value;
+    const password2 = els.signupPass2.value;
+    if (!username || username.length < 3) return setAuthStatus("Username must be at least 3 characters.", true);
+    if (getAuthRecord()) return setAuthStatus("Account already exists on this device. Please login.", true);
+    if (password.length < 10) return setAuthStatus("Password must be at least 10 characters.", true);
+    if (password !== password2) return setAuthStatus("Passwords do not match.", true);
+
+    const material = await deriveKeyMaterial(password);
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const authHash = await deriveAuth(material, salt, PBKDF2_ITERATIONS);
+    localStorage.setItem(AUTH_KEY, JSON.stringify({ username, salt: b64FromBytes(salt), pwdHash: b64FromBytes(authHash), iterations: PBKDF2_ITERATIONS }));
+    els.loginUser.value = username;
+    els.loginPass.value = "";
+    setAuthView("login");
+    setAuthStatus("Account created. You can now login.");
+  }
+
+  async function login() {
+    const rec = getAuthRecord();
+    if (!rec) return setAuthStatus("No account found. Please sign up first.", true);
+
+    const username = els.loginUser.value.trim();
+    const password = els.loginPass.value;
+    if (username !== rec.username) return setAuthStatus("Invalid username or password.", true);
+
+    const material = await deriveKeyMaterial(password);
+    const salt = bytesFromB64(rec.salt);
+    const iterations = clampInt(rec.iterations || PBKDF2_ITERATIONS);
+    const tryHash = await deriveAuth(material, salt, iterations);
+    const savedHash = bytesFromB64(rec.pwdHash);
+    if (!timingSafeEqual(tryHash, savedHash)) return setAuthStatus("Invalid username or password.", true);
+
+    sessionKey = await deriveAesKey(material, salt, iterations);
+    currentUser = rec.username;
+    items = await load();
+    els.authWrap.classList.add("hidden");
+    els.app.classList.remove("hidden");
+    render();
   }
 
   function makeBestBeforeDates(qty, dateValue = "") {
@@ -300,14 +465,12 @@
     for (let i = 0; i < clampInt(qty); i++) out.push(cleanDate);
     return out;
   }
-
   function resizeBestBeforeDates(arr, qty, fillDate = "") {
     const out = Array.isArray(arr) ? arr.slice(0, clampInt(qty)) : [];
     const cleanDate = String(fillDate ?? "").trim();
     while (out.length < clampInt(qty)) out.push(cleanDate);
     return out;
   }
-
   function formatBestBeforeSummary(it) {
     const withDates = (it.bestBeforeDates || []).filter(Boolean).sort();
     if (!it.qty) return "—";
@@ -319,30 +482,16 @@
     const q = els.search.value.trim().toLowerCase();
     const lowMode = els.lowFilter.value;
     let out = items.slice();
-
-    if (q) {
-      out = out.filter(it => {
-        const hay = `${it.name} ${it.sku} ${it.loc} ${it.notes} ${(it.bestBeforeDates || []).join(" ")}`.toLowerCase();
-        return hay.includes(q);
-      });
-    }
-
-    if (lowMode !== "all") {
-      out = out.filter(it => {
-        const low = it.qty <= it.min;
-        return lowMode === "low" ? low : !low;
-      });
-    }
-
+    if (q) out = out.filter(it => `${it.name} ${it.sku} ${it.loc} ${it.notes} ${(it.bestBeforeDates || []).join(" ")}`.toLowerCase().includes(q));
+    if (lowMode !== "all") out = out.filter(it => (lowMode === "low") ? (it.qty <= it.min) : (it.qty > it.min));
     const mode = els.sort.value;
     const cmp = {
-      updated_desc: (a,b) => (b.updatedAt.localeCompare(a.updatedAt)),
+      updated_desc: (a,b) => b.updatedAt.localeCompare(a.updatedAt),
       name_asc: (a,b) => a.name.localeCompare(b.name),
       qty_desc: (a,b) => b.qty - a.qty || a.name.localeCompare(b.name),
       qty_asc: (a,b) => a.qty - b.qty || a.name.localeCompare(b.name),
       loc_asc: (a,b) => a.loc.localeCompare(b.loc) || a.name.localeCompare(b.name),
     }[mode] || ((a,b) => b.updatedAt.localeCompare(a.updatedAt));
-
     out.sort(cmp);
     return out;
   }
@@ -350,9 +499,7 @@
   function render() {
     const view = getFilteredSorted();
     const lowCount = view.filter(it => it.qty <= it.min).length;
-    els.stats.textContent =
-      `Items: ${view.length}  •  Low stock: ${lowCount}  •  Total unique SKUs: ${new Set(view.map(i => i.sku).filter(Boolean)).size}`;
-
+    els.stats.textContent = `Items: ${view.length}  •  Low stock: ${lowCount}  •  Total unique SKUs: ${new Set(view.map(i => i.sku).filter(Boolean)).size}`;
     els.rows.innerHTML = "";
     for (const it of view) {
       const low = it.qty <= it.min;
@@ -372,14 +519,13 @@
           <button data-act="plus" data-id="${it.id}">+1</button>
           <button data-act="minus" data-id="${it.id}">-1</button>
           <button class="danger" data-act="del" data-id="${it.id}">Delete</button>
-        </td>
-      `;
+        </td>`;
       els.rows.appendChild(tr);
     }
-    save();
+    save().catch(() => {});
   }
 
-  function upsertFromForm() {
+  function upsertFromForm() { /* unchanged logic */
     const name = els.name.value.trim();
     const sku = els.sku.value.trim();
     const qty = clampInt(els.qty.value);
@@ -387,17 +533,10 @@
     const loc = els.loc.value.trim();
     const min = clampInt(els.min.value);
     const notes = els.notes.value.trim();
-
     if (!name && !sku) { alert("Add at least a name or SKU."); return; }
-
     let it = sku ? items.find(x => x.sku.toLowerCase() === sku.toLowerCase()) : null;
-
     if (!it) {
-      it = normalizeItem({
-        id: crypto.randomUUID(), name, sku, qty, loc, min, notes,
-        bestBeforeDates: makeBestBeforeDates(qty, bestBefore),
-        updatedAt: nowISO()
-      });
+      it = normalizeItem({ id: crypto.randomUUID(), name, sku, qty, loc, min, notes, bestBeforeDates: makeBestBeforeDates(qty, bestBefore), updatedAt: nowISO() });
       items.push(it);
     } else {
       const isEditingThisItem = editingId && editingId === it.id;
@@ -409,425 +548,71 @@
         it.qty = clampInt(it.qty + qty);
         it.bestBeforeDates = (it.bestBeforeDates || []).concat(makeBestBeforeDates(qty, bestBefore));
       }
-      it.loc = loc;
-      it.min = min;
-      it.notes = notes;
-      it.updatedAt = nowISO();
+      it.loc = loc; it.min = min; it.notes = notes; it.updatedAt = nowISO();
     }
-
     editingId = null;
-    els.name.value = "";
-    els.sku.value = "";
-    els.qty.value = "1";
-    els.loc.value = "";
-    els.min.value = "0";
-    els.bestBefore.value = "";
-    els.notes.value = "";
+    els.name.value = ""; els.sku.value = ""; els.qty.value = "1"; els.loc.value = ""; els.min.value = "0"; els.bestBefore.value = ""; els.notes.value = "";
     els.name.focus();
-
     render();
   }
 
-  function editToForm(id) {
-    const it = items.find(x => x.id === id);
-    if (!it) return;
-    editingId = id;
-    els.name.value = it.name;
-    els.sku.value = it.sku;
-    els.qty.value = String(it.qty);
-    els.loc.value = it.loc;
-    els.min.value = String(it.min);
-    els.bestBefore.value = it.bestBeforeDates.find(Boolean) || "";
-    els.notes.value = it.notes;
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    els.name.focus();
-  }
+  function editToForm(id) { const it = items.find(x => x.id === id); if (!it) return; editingId = id; els.name.value = it.name; els.sku.value = it.sku; els.qty.value = String(it.qty); els.loc.value = it.loc; els.min.value = String(it.min); els.bestBefore.value = it.bestBeforeDates.find(Boolean) || ""; els.notes.value = it.notes; window.scrollTo({ top: 0, behavior: "smooth" }); els.name.focus(); }
+  function adjustQty(id, delta) { const it = items.find(x => x.id === id); if (!it) return; it.qty = clampInt(it.qty + delta); it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, it.qty, ""); it.updatedAt = nowISO(); render(); }
+  function editBestBeforeDates(id) { const it = items.find(x => x.id === id); if (!it) return; editingBestBeforeId = id; els.bestBeforeMeta.textContent = `${it.name || "(unnamed)"} • Qty: ${it.qty}`; els.bestBeforeInputs.innerHTML = ""; for (let i = 0; i < it.qty; i++) { const row = document.createElement("label"); row.innerHTML = `Unit ${i + 1}<input type="date" data-best-before-index="${i}" value="${escapeHtml(it.bestBeforeDates?.[i] || "")}" />`; els.bestBeforeInputs.appendChild(row);} openDialog(els.bestBeforeDialog); }
+  function saveBestBeforeDates() { const it = items.find(x => x.id === editingBestBeforeId); if (!it) return; const inputs = [...els.bestBeforeInputs.querySelectorAll("input[data-best-before-index]")]; it.bestBeforeDates = inputs.sort((a,b)=>Number(a.dataset.bestBeforeIndex)-Number(b.dataset.bestBeforeIndex)).map(input => String(input.value || "").trim()); it.updatedAt = nowISO(); editingBestBeforeId = null; closeDialog(els.bestBeforeDialog); render(); }
+  function delItem(id) { const it = items.find(x => x.id === id); if (!it) return; if (!confirm(`Delete "${it.name || it.sku || "item"}"?`)) return; items = items.filter(x => x.id !== id); if (editingId === id) editingId = null; render(); }
 
-  function adjustQty(id, delta) {
-    const it = items.find(x => x.id === id);
-    if (!it) return;
-    it.qty = clampInt(it.qty + delta);
-    it.bestBeforeDates = resizeBestBeforeDates(it.bestBeforeDates, it.qty, "");
-    it.updatedAt = nowISO();
-    render();
-  }
+  function download(filename, text, mime="text/plain") { const blob = new Blob([text], { type: mime }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
+  function exportJSON() { const payload = { version: 1, exportedAt: nowISO(), items }; download(`inventory-backup-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(payload, null, 2), "application/json"); }
+  function toCSVRow(values) { return values.map(v => { const s = String(v ?? ""); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(","); }
+  function exportCSV() { const header = ["name","sku","qty","loc","min","bestBeforeDates","notes","updatedAt"]; const lines = [toCSVRow(header)]; for (const it of items) lines.push(toCSVRow([it.name, it.sku, it.qty, it.loc, it.min, (it.bestBeforeDates || []).join("|"), it.notes, it.updatedAt])); download(`inventory-${new Date().toISOString().slice(0,10)}.csv`, lines.join("\n"), "text/csv"); }
 
-  function editBestBeforeDates(id) {
-    const it = items.find(x => x.id === id);
-    if (!it) return;
+  function parseCSV(text) { const rows=[]; let i=0,field="",row=[],inQuotes=false; while(i<text.length){const c=text[i]; if(inQuotes){ if(c==='"'){ if(text[i+1]==='"'){field+='"';i+=2;continue;} inQuotes=false;i++;continue;} field+=c;i++;continue; } else { if(c==='"'){inQuotes=true;i++;continue;} if(c===","){row.push(field);field="";i++;continue;} if(c==="\n"){row.push(field);rows.push(row);field="";row=[];i++;continue;} if(c==="\r"){i++;continue;} field+=c;i++;continue; } } row.push(field); rows.push(row); return rows.filter(r=>r.some(x=>String(x).trim()!=="")); }
 
-    editingBestBeforeId = id;
-    els.bestBeforeMeta.textContent = `${it.name || "(unnamed)"} • Qty: ${it.qty}`;
-    els.bestBeforeInputs.innerHTML = "";
+  function importData(text) { const t = text.trim(); if (!t) return; try { const obj = JSON.parse(t); let incoming = null; if (Array.isArray(obj)) incoming = obj; else if (obj && Array.isArray(obj.items)) incoming = obj.items; if (incoming) { const normalized = incoming.map(normalizeItem).filter(Boolean); for (const it of normalized) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it); } render(); return { ok: true, msg: `Imported ${normalized.length} item(s) from JSON.` }; } } catch {}
+    const rows = parseCSV(t); if (rows.length < 2) return { ok:false, msg:"CSV needs a header row and at least one data row." }; const header = rows[0].map(h => String(h).trim().toLowerCase()); const idx = (key)=>header.indexOf(key); const imported=[];
+    for (let r=1; r<rows.length; r++) { const row = rows[r]; const it = normalizeItem({ id: crypto.randomUUID(), name: row[idx("name")] ?? "", sku: row[idx("sku")] ?? "", qty: row[idx("qty")] ?? 0, loc: row[idx("loc")] ?? "", min: row[idx("min")] ?? 0, bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x=>x.trim()).filter(Boolean), notes: row[idx("notes")] ?? "", updatedAt: row[idx("updatedat")] ?? nowISO() }); if (!it.name && !it.sku) continue; imported.push(it);} for (const it of imported) { if (it.sku) { const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase()); if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; } } it.updatedAt = nowISO(); items.push(it);} render(); return { ok:true, msg:`Imported ${imported.length} item(s) from CSV.`}; }
 
-    for (let i = 0; i < it.qty; i++) {
-      const row = document.createElement("label");
-      row.innerHTML = `
-        Unit ${i + 1}
-        <input type="date" data-best-before-index="${i}" value="${escapeHtml(it.bestBeforeDates?.[i] || "")}" />
-      `;
-      els.bestBeforeInputs.appendChild(row);
-    }
-
-    openDialog(els.bestBeforeDialog);
-  }
-
-  function saveBestBeforeDates() {
-    const it = items.find(x => x.id === editingBestBeforeId);
-    if (!it) return;
-
-    const inputs = [...els.bestBeforeInputs.querySelectorAll("input[data-best-before-index]")];
-    it.bestBeforeDates = inputs
-      .sort((a, b) => Number(a.dataset.bestBeforeIndex) - Number(b.dataset.bestBeforeIndex))
-      .map(input => String(input.value || "").trim());
-    it.updatedAt = nowISO();
-    editingBestBeforeId = null;
-    closeDialog(els.bestBeforeDialog);
-    render();
-  }
-
-  function delItem(id) {
-    const it = items.find(x => x.id === id);
-    if (!it) return;
-    if (!confirm(`Delete "${it.name || it.sku || "item"}"?`)) return;
-    items = items.filter(x => x.id !== id);
-    if (editingId === id) editingId = null;
-    render();
-  }
-
-  function download(filename, text, mime="text/plain") {
-    const blob = new Blob([text], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  function exportJSON() {
-    const payload = { version: 1, exportedAt: nowISO(), items };
-    download(`inventory-backup-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(payload, null, 2), "application/json");
-  }
-
-  function toCSVRow(values) {
-    return values.map(v => {
-      const s = String(v ?? "");
-      const needs = /[,"\n]/.test(s);
-      return needs ? `"${s.replace(/"/g, '""')}"` : s;
-    }).join(",");
-  }
-
-  function exportCSV() {
-    const header = ["name","sku","qty","loc","min","bestBeforeDates","notes","updatedAt"];
-    const lines = [toCSVRow(header)];
-    for (const it of items) {
-      lines.push(toCSVRow([it.name, it.sku, it.qty, it.loc, it.min, (it.bestBeforeDates || []).join("|"), it.notes, it.updatedAt]));
-    }
-    download(`inventory-${new Date().toISOString().slice(0,10)}.csv`, lines.join("\n"), "text/csv");
-  }
-
-  function parseCSV(text) {
-    const rows = [];
-    let i = 0, field = "", row = [], inQuotes = false;
-
-    while (i < text.length) {
-      const c = text[i];
-
-      if (inQuotes) {
-        if (c === '"') {
-          if (text[i+1] === '"') { field += '"'; i += 2; continue; }
-          inQuotes = false; i++; continue;
-        }
-        field += c; i++; continue;
-      } else {
-        if (c === '"') { inQuotes = true; i++; continue; }
-        if (c === ",") { row.push(field); field = ""; i++; continue; }
-        if (c === "\n") { row.push(field); rows.push(row); field = ""; row = []; i++; continue; }
-        if (c === "\r") { i++; continue; }
-        field += c; i++; continue;
-      }
-    }
-    row.push(field);
-    rows.push(row);
-    return rows.filter(r => r.some(x => String(x).trim() !== ""));
-  }
-
-  function importData(text) {
-    const t = text.trim();
-    if (!t) return;
-
-    try {
-      const obj = JSON.parse(t);
-      let incoming = null;
-      if (Array.isArray(obj)) incoming = obj;
-      else if (obj && Array.isArray(obj.items)) incoming = obj.items;
-
-      if (incoming) {
-        const normalized = incoming.map(normalizeItem).filter(Boolean);
-        for (const it of normalized) {
-          if (it.sku) {
-            const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase());
-            if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; }
-          }
-          it.updatedAt = nowISO();
-          items.push(it);
-        }
-        render();
-        return { ok: true, msg: `Imported ${normalized.length} item(s) from JSON.` };
-      }
-    } catch {}
-
-    const rows = parseCSV(t);
-    if (rows.length < 2) return { ok: false, msg: "CSV needs a header row and at least one data row." };
-
-    const header = rows[0].map(h => String(h).trim().toLowerCase());
-    const idx = (key) => header.indexOf(key);
-
-    const imported = [];
-    for (let r = 1; r < rows.length; r++) {
-      const row = rows[r];
-      const it = normalizeItem({
-        id: crypto.randomUUID(),
-        name: row[idx("name")] ?? "",
-        sku: row[idx("sku")] ?? "",
-        qty: row[idx("qty")] ?? 0,
-        loc: row[idx("loc")] ?? "",
-        min: row[idx("min")] ?? 0,
-        bestBeforeDates: String(row[idx("bestbeforedates")] ?? "").split("|").map(x => x.trim()).filter(Boolean),
-        notes: row[idx("notes")] ?? "",
-        updatedAt: row[idx("updatedat")] ?? nowISO(),
-      });
-      if (!it.name && !it.sku) continue;
-      imported.push(it);
-    }
-
-    for (const it of imported) {
-      if (it.sku) {
-        const existing = items.find(x => x.sku.toLowerCase() === it.sku.toLowerCase());
-        if (existing) { Object.assign(existing, it, { id: existing.id, updatedAt: nowISO() }); continue; }
-      }
-      it.updatedAt = nowISO();
-      items.push(it);
-    }
-    render();
-    return { ok: true, msg: `Imported ${imported.length} item(s) from CSV.` };
-  }
-
-  // --- Barcode scanning (ZXing) ---
   let codeReader = null;
+  function openDialog(el){ if (typeof el.showModal === "function") el.showModal(); else el.setAttribute("open",""); }
+  function closeDialog(el){ if (typeof el.close === "function") el.close(); else el.removeAttribute("open"); }
+  async function fetchProductNameByBarcode(barcode) { const code = String(barcode ?? "").trim(); if (!code) return ""; const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 4500); try { const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`, { signal: controller.signal }); if (!res.ok) return ""; const data = await res.json(); return String(data?.product?.product_name || data?.product?.product_name_en || "").trim(); } catch { return ""; } finally { clearTimeout(timer); } }
+  async function autoFillNameFromBarcode(barcode){ const foundName = await fetchProductNameByBarcode(barcode); if (els.sku.value.trim() !== barcode) return; if (foundName) { if (!els.name.value.trim()) els.name.value = foundName; els.scanStatus.textContent = `Scanned: ${barcode} (name found online)`; els.qty.focus(); return; } els.scanStatus.textContent = `Scanned: ${barcode} (no product name found online)`; els.name.focus(); }
+  function parseBestBeforeFromScan(text) { const raw = String(text ?? "").trim(); if (!raw) return ""; if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw; const dmyOrMdy = raw.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})\b/); if (dmyOrMdy) { let a = Number(dmyOrMdy[1]); let b = Number(dmyOrMdy[2]); let y = Number(dmyOrMdy[3]); if (y < 100) y += 2000; const day = a > 12 ? a : b; const month = a > 12 ? b : a; return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`; } const ymd = raw.match(/\b(\d{4})(\d{2})(\d{2})\b/); if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`; return ""; }
+  async function startScan(mode = "sku") { if (!window.isSecureContext) { alert("Camera access is blocked because this page isn't opened in a secure context."); return; } if (!navigator.mediaDevices?.getUserMedia) { alert("Camera API not available in this browser."); return; } if (!window.ZXing) { alert("Scanner library failed to load (need internet)."); return; }
+    els.scanStatus.textContent = "Starting camera…"; openDialog(els.scanDialog); codeReader = new ZXing.BrowserMultiFormatReader();
+    try { const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false }; await codeReader.decodeFromConstraints(constraints, els.video, (result, err) => { if (result?.text) { const value = result.text.trim(); stopScan(); if (mode === "bestBefore") { const parsedDate = parseBestBeforeFromScan(value); if (parsedDate) { els.bestBefore.value = parsedDate; els.scanStatus.textContent = `Scanned best before date: ${parsedDate}`; } else { els.scanStatus.textContent = `Scanned text did not look like a date: ${value}`; } els.bestBefore.focus(); } else { els.sku.value = value; const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase()); if (existing?.name) { els.name.value = existing.name; els.scanStatus.textContent = `Scanned: ${value} (name auto-filled from inventory)`; els.qty.focus(); } else { els.scanStatus.textContent = `Scanned: ${value}. Looking up name online…`; autoFillNameFromBarcode(value); } } return; }
+      if (!err) return; if (err.name === "NotFoundException") { els.scanStatus.textContent = "Scanning…"; return; } els.scanStatus.textContent = `Scanner error: ${err.message || err.name || "Unknown error"}`; }); } catch (e) { els.scanStatus.textContent = `Could not start camera: ${e?.message || e}`; } }
+  function stopScan() { try { codeReader?.reset(); } catch {} codeReader = null; try { const stream = els.video.srcObject; if (stream) stream.getTracks().forEach(t => t.stop()); els.video.srcObject = null; } catch {} closeDialog(els.scanDialog); }
 
-  function openDialog(el) {
-    if (typeof el.showModal === "function") el.showModal();
-    else el.setAttribute("open", "");
-  }
+  els.showLogin.addEventListener("click", () => setAuthView("login"));
+  els.showSignup.addEventListener("click", () => setAuthView("signup"));
+  els.signupBtn.addEventListener("click", () => signup().catch(() => setAuthStatus("Could not create account.", true)));
+  els.loginBtn.addEventListener("click", () => login().catch(() => setAuthStatus("Login failed.", true)));
+  [els.loginPass, els.loginUser].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") login().catch(() => setAuthStatus("Login failed.", true)); }));
+  [els.signupPass, els.signupPass2, els.signupUser].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") signup().catch(() => setAuthStatus("Could not create account.", true)); }));
 
-  function closeDialog(el) {
-    if (typeof el.close === "function") el.close();
-    else el.removeAttribute("open");
-  }
-
-  async function fetchProductNameByBarcode(barcode) {
-    const code = String(barcode ?? "").trim();
-    if (!code) return "";
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4500);
-
-    try {
-      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`, {
-        signal: controller.signal,
-      });
-      if (!res.ok) return "";
-
-      const data = await res.json();
-      return String(data?.product?.product_name || data?.product?.product_name_en || "").trim();
-    } catch {
-      return "";
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async function autoFillNameFromBarcode(barcode) {
-    const foundName = await fetchProductNameByBarcode(barcode);
-    if (els.sku.value.trim() !== barcode) return;
-
-    if (foundName) {
-      if (!els.name.value.trim()) els.name.value = foundName;
-      els.scanStatus.textContent = `Scanned: ${barcode} (name found online)`;
-      els.qty.focus();
-      return;
-    }
-
-    els.scanStatus.textContent = `Scanned: ${barcode} (no product name found online)`;
-    els.name.focus();
-  }
-
-  function parseBestBeforeFromScan(text) {
-    const raw = String(text ?? "").trim();
-    if (!raw) return "";
-
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-
-    const dmyOrMdy = raw.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})\b/);
-    if (dmyOrMdy) {
-      let a = Number(dmyOrMdy[1]);
-      let b = Number(dmyOrMdy[2]);
-      let y = Number(dmyOrMdy[3]);
-      if (y < 100) y += 2000;
-      const day = a > 12 ? a : b;
-      const month = a > 12 ? b : a;
-      return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-    }
-
-    const ymd = raw.match(/\b(\d{4})(\d{2})(\d{2})\b/);
-    if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
-
-    return "";
-  }
-
-  async function startScan(mode = "sku") {
-    // Camera requires secure context. localhost over http is allowed in Chrome.
-    if (!window.isSecureContext) {
-      alert("Camera access is blocked because this page isn't opened in a secure context.\n\nUse Termux: python -m http.server then open http://localhost:8000/inventory.html");
-      return;
-    }
-    if (!navigator.mediaDevices?.getUserMedia) {
-      alert("Camera API not available in this browser.");
-      return;
-    }
-    if (!window.ZXing) {
-      alert("Scanner library failed to load (need internet).");
-      return;
-    }
-
-    els.scanStatus.textContent = "Starting camera…";
-    openDialog(els.scanDialog);
-
-    codeReader = new ZXing.BrowserMultiFormatReader();
-    try {
-      // Prefer rear camera if available
-      const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
-      await codeReader.decodeFromConstraints(constraints, els.video, (result, err) => {
-        if (result?.text) {
-          const value = result.text.trim();
-          stopScan();
-
-          if (mode === "bestBefore") {
-            const parsedDate = parseBestBeforeFromScan(value);
-            if (parsedDate) {
-              els.bestBefore.value = parsedDate;
-              els.scanStatus.textContent = `Scanned best before date: ${parsedDate}`;
-            } else {
-              els.scanStatus.textContent = `Scanned text did not look like a date: ${value}`;
-            }
-            els.bestBefore.focus();
-          } else {
-            els.sku.value = value;
-            const existing = items.find(x => x.sku.toLowerCase() === value.toLowerCase());
-
-            if (existing?.name) {
-              els.name.value = existing.name;
-              els.scanStatus.textContent = `Scanned: ${value} (name auto-filled from inventory)`;
-              els.qty.focus();
-            } else {
-              els.scanStatus.textContent = `Scanned: ${value}. Looking up name online…`;
-              autoFillNameFromBarcode(value);
-            }
-          }
-          return;
-        }
-        if (!err) return;
-        if (err.name === "NotFoundException") {
-          els.scanStatus.textContent = "Scanning…";
-          return;
-        }
-        els.scanStatus.textContent = `Scanner error: ${err.message || err.name || "Unknown error"}`;
-      });
-    } catch (e) {
-      els.scanStatus.textContent = `Could not start camera: ${e?.message || e}`;
-    }
-  }
-
-  function stopScan() {
-    try { codeReader?.reset(); } catch {}
-    codeReader = null;
-
-    try {
-      const stream = els.video.srcObject;
-      if (stream) stream.getTracks().forEach(t => t.stop());
-      els.video.srcObject = null;
-    } catch {}
-
-    closeDialog(els.scanDialog);
-  }
-
-  // Form and table actions
   els.addBtn.addEventListener("click", upsertFromForm);
-  [els.name, els.sku, els.qty, els.loc, els.min, els.notes].forEach((input) => {
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") upsertFromForm();
-    });
-  });
-
+  [els.name, els.sku, els.qty, els.loc, els.min, els.notes].forEach((input) => input.addEventListener("keydown", (e) => { if (e.key === "Enter") upsertFromForm(); }));
   els.scanBtn.addEventListener("click", () => startScan("sku"));
   els.scanBestBeforeBtn.addEventListener("click", () => startScan("bestBefore"));
   els.stopScan.addEventListener("click", stopScan);
   els.scanDialog.addEventListener("close", stopScan);
-  els.scanDialog.addEventListener("cancel", (e) => {
-    e.preventDefault();
-    stopScan();
-  });
-
-  els.rows.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-act]");
-    if (!btn) return;
-    const id = btn.dataset.id;
-    const act = btn.dataset.act;
-    if (act === "edit") editToForm(id);
-    if (act === "dates") editBestBeforeDates(id);
-    if (act === "plus") adjustQty(id, 1);
-    if (act === "minus") adjustQty(id, -1);
-    if (act === "del") delItem(id);
-  });
-
-  [els.search, els.lowFilter, els.sort].forEach(el => {
-    el.addEventListener("input", render);
-    el.addEventListener("change", render);
-  });
-
+  els.scanDialog.addEventListener("cancel", (e) => { e.preventDefault(); stopScan(); });
+  els.rows.addEventListener("click", (e) => { const btn = e.target.closest("button[data-act]"); if (!btn) return; const id = btn.dataset.id; const act = btn.dataset.act; if (act === "edit") editToForm(id); if (act === "dates") editBestBeforeDates(id); if (act === "plus") adjustQty(id, 1); if (act === "minus") adjustQty(id, -1); if (act === "del") delItem(id); });
+  [els.search, els.lowFilter, els.sort].forEach(el => { el.addEventListener("input", render); el.addEventListener("change", render); });
   els.exportJson.addEventListener("click", exportJSON);
   els.exportCsv.addEventListener("click", exportCSV);
-
-  els.importBtn.addEventListener("click", () => {
-    els.importText.value = "";
-    openDialog(els.importDialog);
-  });
+  els.importBtn.addEventListener("click", () => { els.importText.value = ""; openDialog(els.importDialog); });
   els.closeImport.addEventListener("click", () => closeDialog(els.importDialog));
-  els.doImport.addEventListener("click", () => {
-    const res = importData(els.importText.value);
-    if (!res) return;
-    alert(res.msg);
-    if (res.ok) closeDialog(els.importDialog);
-  });
-
-  els.wipe.addEventListener("click", () => {
-    if (!confirm("Delete all inventory items on this device?")) return;
-    items = [];
-    render();
-  });
-
-  els.closeBestBefore.addEventListener("click", () => {
-    editingBestBeforeId = null;
-    closeDialog(els.bestBeforeDialog);
-  });
+  els.doImport.addEventListener("click", () => { const res = importData(els.importText.value); if (!res) return; alert(res.msg); if (res.ok) closeDialog(els.importDialog); });
+  els.wipe.addEventListener("click", () => { if (!confirm("Delete all inventory items on this device?")) return; items = []; render(); });
+  els.closeBestBefore.addEventListener("click", () => { editingBestBeforeId = null; closeDialog(els.bestBeforeDialog); });
   els.saveBestBefore.addEventListener("click", saveBestBeforeDates);
 
-  render();
+  setAuthView("login");
 })();
 </script>
+  </main>
 </body>
 </html>
