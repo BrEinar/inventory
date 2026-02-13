@@ -95,13 +95,13 @@ Use this as a working task board. Each task maps directly to the plan points abo
   - [x] Persist and restore authenticated session on app load.
   - [x] Add basic auth error handling and user-facing messages.
 
-- [ ] **Task 1.2 — Create shared data tables.**
-  - [ ] Create `households` table.
-  - [ ] Create `household_members` table with roles: `owner`, `editor`, `viewer`.
-  - [ ] Create `inventory_items` table.
-  - [ ] Create `recipes` table.
-  - [ ] Create `meal_plan_entries` table.
-  - [ ] Create `shopping_list_items` table.
+- [x] **Task 1.2 — Create shared data tables.**
+  - [x] Create `households` table.
+  - [x] Create `household_members` table with roles: `owner`, `editor`, `viewer`.
+  - [x] Create `inventory_items` table.
+  - [x] Create `recipes` table.
+  - [x] Create `meal_plan_entries` table.
+  - [x] Create `shopping_list_items` table.
 
 - [ ] **Task 1.3 — Add `household_id` to shared entities.**
   - [ ] Ensure every shared table includes `household_id`.
