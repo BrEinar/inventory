@@ -641,6 +641,7 @@
     const loc = els.loc.value.trim();
     const min = clampInt(els.min.value);
     const notes = els.notes.value.trim();
+    const hasUnitInput = unitValue > 0 || Boolean(unitType);
     if (!name && !sku) { alert("Add at least a name or SKU."); return; }
     let it = sku ? items.find(x => x.sku.toLowerCase() === sku.toLowerCase()) : null;
     if (!it) {
@@ -657,14 +658,25 @@
         it.qty = clampInt(it.qty + qty);
         it.bestBeforeDates = appendBestBeforeDates(it.bestBeforeDates, previousQty, qty, bestBefore);
       }
-      it.unitValue = unitValue;
-      it.unitType = ["g", "kg", "ml", "l"].includes(unitType) ? unitType : "";
+      if (isEditingThisItem || hasUnitInput) {
+        it.unitValue = unitValue;
+        it.unitType = ["g", "kg", "ml", "l"].includes(unitType) ? unitType : "";
+      }
       it.loc = loc; it.min = min; it.notes = notes; it.updatedAt = nowISO();
     }
     editingId = null;
     els.name.value = ""; els.sku.value = ""; els.qty.value = "1"; els.unitValue.value = "0"; els.unitType.value = ""; els.loc.value = ""; els.min.value = "0"; els.bestBefore.value = ""; els.notes.value = "";
     els.name.focus();
     render();
+  }
+
+  function prefillMeasureFromExistingSku(skuValue) {
+    const sku = String(skuValue ?? "").trim();
+    if (!sku) return;
+    const existing = items.find(x => x.sku.toLowerCase() === sku.toLowerCase());
+    if (!existing) return;
+    if (existing.unitValue > 0 && clampFloat(els.unitValue.value) <= 0) els.unitValue.value = String(existing.unitValue);
+    if (existing.unitType && !els.unitType.value) els.unitType.value = existing.unitType;
   }
 
   function editToForm(id) { const it = items.find(x => x.id === id); if (!it) return; editingId = id; els.name.value = it.name; els.sku.value = it.sku; els.qty.value = String(it.qty); els.unitValue.value = String(it.unitValue || 0); els.unitType.value = it.unitType || ""; els.loc.value = it.loc; els.min.value = String(it.min); els.bestBefore.value = it.bestBeforeDates.find(Boolean) || ""; els.notes.value = it.notes; window.scrollTo({ top: 0, behavior: "smooth" }); els.name.focus(); }
@@ -771,6 +783,8 @@
   [els.name, els.sku, els.qty, els.unitValue, els.unitType, els.loc, els.min, els.notes].forEach((input) => input.addEventListener("keydown", (e) => { if (e.key === "Enter") upsertFromForm(); }));
   els.scanBtn.addEventListener("click", () => startScan("sku"));
   els.scanBestBeforeBtn.addEventListener("click", () => startScan("bestBefore"));
+  els.sku.addEventListener("input", () => prefillMeasureFromExistingSku(els.sku.value));
+  els.sku.addEventListener("blur", () => prefillMeasureFromExistingSku(els.sku.value));
   els.stopScan.addEventListener("click", stopScan);
   els.scanDialog.addEventListener("close", stopScan);
   els.scanDialog.addEventListener("cancel", (e) => { e.preventDefault(); stopScan(); });
