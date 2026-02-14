@@ -646,33 +646,10 @@
   async function ensureCloudHouseholdId() {
     if (!usingCloudAuth || !supabaseClient) return null;
     if (cloudHouseholdId) return cloudHouseholdId;
-    const { data: userRes } = await supabaseClient.auth.getUser();
-    const userId = userRes?.user?.id;
-    if (!userId) return null;
-    const existing = await supabaseClient
-      .from("household_members")
-      .select("household_id")
-      .eq("user_id", userId)
-      .limit(1)
-      .maybeSingle();
-    if (existing.data?.household_id) {
-      cloudHouseholdId = existing.data.household_id;
-      return cloudHouseholdId;
-    }
-    const created = await supabaseClient
-      .from("households")
-      .insert({ name: "My household" })
-      .select("id")
-      .single();
-    if (created.error || !created.data?.id) throw created.error || new Error("Could not create household.");
-    const householdId = created.data.id;
-    const memberInsert = await supabaseClient.from("household_members").insert({
-      household_id: householdId,
-      user_id: userId,
-      role: "owner",
-    });
-    if (memberInsert.error) throw memberInsert.error;
-    cloudHouseholdId = householdId;
+    const { data, error } = await supabaseClient.rpc("ensure_household_for_current_user");
+    if (error) throw error;
+    if (!data) return null;
+    cloudHouseholdId = data;
     return cloudHouseholdId;
   }
 
