@@ -646,8 +646,26 @@
   async function ensureCloudHouseholdId() {
     if (!usingCloudAuth || !supabaseClient) return null;
     if (cloudHouseholdId) return cloudHouseholdId;
+    const memberRow = await supabaseClient
+      .from("household_members")
+      .select("household_id")
+      .eq("user_id", currentUser?.id || "")
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (memberRow.error) throw memberRow.error;
+    if (memberRow.data?.household_id) {
+      cloudHouseholdId = memberRow.data.household_id;
+      return cloudHouseholdId;
+    }
+
     const { data, error } = await supabaseClient.rpc("ensure_household_for_current_user");
-    if (error) throw error;
+    if (error) {
+      if (String(error.message || "").includes("ensure_household_for_current_user without parameters")) {
+        throw new Error("Cloud DB is missing the ensure_household_for_current_user() migration. Run supabase_phase1_task1_2_tables.sql in your Supabase SQL editor, then refresh.");
+      }
+      throw error;
+    }
     if (!data) return null;
     cloudHouseholdId = data;
     return cloudHouseholdId;
