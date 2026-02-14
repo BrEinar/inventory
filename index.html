@@ -510,6 +510,9 @@
   let activeTab = "inventory";
   let supabaseClient = null;
   let usingCloudAuth = false;
+  const RESERVED_EMAIL_DOMAINS = new Set(["example.com", "example.org", "example.net", "localhost", "test.com"]);
+  const PASSWORD_RESET_COOLDOWN_MS = 60_000;
+  let lastPasswordResetAt = 0;
   let cloudHouseholdId = null;
   let shoppingListItems = [];
   let cloudSyncInFlight = false;
@@ -856,15 +859,24 @@
       setAuthStatus("Password reset requires cloud auth configuration.", true);
       return;
     }
-    const email = els.loginUser.value.trim();
-    if (!email) {
-      setAuthStatus("Enter your email/username first.", true);
+    const email = normalizeEmail(els.loginUser.value);
+    const emailError = getEmailValidationError(email);
+    if (emailError) {
+      setAuthStatus(emailError, true);
+      return;
+    }
+    const elapsed = Date.now() - lastPasswordResetAt;
+    if (elapsed < PASSWORD_RESET_COOLDOWN_MS) {
+      const waitSeconds = Math.ceil((PASSWORD_RESET_COOLDOWN_MS - elapsed) / 1000);
+      setAuthStatus(`Please wait ${waitSeconds}s before requesting another reset email.`, true);
       return;
     }
     const { error } = await supabaseClient.auth.resetPasswordForEmail(email);
     if (error) throw error;
+    lastPasswordResetAt = Date.now();
     setAuthStatus("If this account exists, a reset email was sent.");
   }
+
 
   async function stopCloudRealtime() {
     for (const channel of cloudChannels) {
@@ -1052,6 +1064,18 @@
     els.authStatus.style.color = bad ? "#c00" : "";
   }
 
+  function normalizeEmail(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function getEmailValidationError(email) {
+    if (!email) return "Enter an email address.";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return "Enter a valid email address.";
+    const domain = email.split("@")[1] || "";
+    if (RESERVED_EMAIL_DOMAINS.has(domain)) return "Use a real email inbox (not a placeholder/test domain).";
+    return "";
+  }
+
   function setAuthView(mode) {
     const loginMode = mode === "login";
     els.loginPanel.classList.toggle("hidden", !loginMode);
@@ -1063,10 +1087,11 @@
 
   async function signup() {
     if (!supabaseClient) return setAuthStatus("Cloud configuration is missing. Contact the app owner.", true);
-    const email = els.signupUser.value.trim();
+    const email = normalizeEmail(els.signupUser.value);
     const password = els.signupPass.value;
     const password2 = els.signupPass2.value;
-    if (!email.includes("@")) return setAuthStatus("Use an email address for cloud sign up.", true);
+    const emailError = getEmailValidationError(email);
+    if (emailError) return setAuthStatus(emailError, true);
     if (password.length < 10) return setAuthStatus("Password must be at least 10 characters.", true);
     if (password !== password2) return setAuthStatus("Passwords do not match.", true);
     const { error } = await supabaseClient.auth.signUp({ email, password });
@@ -1078,8 +1103,10 @@
 
   async function login() {
     if (!supabaseClient) return setAuthStatus("Cloud configuration is missing. Contact the app owner.", true);
-    const email = els.loginUser.value.trim();
+    const email = normalizeEmail(els.loginUser.value);
     const password = els.loginPass.value;
+    const emailError = getEmailValidationError(email);
+    if (emailError) return setAuthStatus(emailError, true);
     const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
     if (error || !data?.user) return setAuthStatus(error?.message || "Invalid email or password.", true);
     currentUser = data.user.email || data.user.id;
