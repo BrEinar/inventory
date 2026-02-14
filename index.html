@@ -126,7 +126,7 @@
 <body>
   <div id="authWrap" class="auth-wrap">
     <h1>🔐 Inventory login</h1>
-    <div class="muted">Your inventory is encrypted on this device using your password.</div>
+    <div class="muted">Your inventory is cloud-synced across devices using your account.</div>
     <div class="card" style="margin-top:10px;">
       <div class="auth-tabs">
         <button id="showLogin" class="primary">Login</button>
@@ -153,7 +153,7 @@
 
   <main id="app" class="hidden">
   <h1>📦 Inventory</h1>
-  <div class="muted">Offline storage on this device.</div>
+  <div class="muted">Cloud-synced household inventory.</div>
 
   <div class="app-tabs" role="tablist" aria-label="Main app sections">
     <button id="tabInventory" class="primary app-tab" data-tab="inventory" role="tab" aria-controls="panelInventory" aria-selected="true">Inventory</button>
@@ -406,7 +406,10 @@
   const AUTH_USERS_KEY = "inventory_auth_users_v2";
   const ENC_KEY_PREFIX = "inventory_encrypted_v1_";
   const CLOUD_CACHE_PREFIX = "inventory_cloud_cache_v1_";
-  const SUPABASE_CONFIG_KEY = "inventory_supabase_config_v1";
+  const BUILT_IN_SUPABASE_CONFIG = Object.freeze({
+    url: "https://YOUR_PROJECT_REF.supabase.co",
+    anonKey: "YOUR_SUPABASE_ANON_KEY",
+  });
   const PBKDF2_ITERATIONS = 210000;
   const $ = (id) => document.getElementById(id);
 
@@ -514,13 +517,10 @@
   let cloudChannels = [];
 
   function getCloudConfig() {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(SUPABASE_CONFIG_KEY) || "null");
-      if (!parsed?.url || !parsed?.anonKey) return null;
-      return { url: String(parsed.url), anonKey: String(parsed.anonKey) };
-    } catch {
-      return null;
-    }
+    const cfg = BUILT_IN_SUPABASE_CONFIG || null;
+    if (!cfg?.url || !cfg?.anonKey) return null;
+    if (cfg.url.includes("YOUR_PROJECT_REF") || cfg.anonKey.includes("YOUR_SUPABASE_ANON_KEY")) return null;
+    return { url: String(cfg.url), anonKey: String(cfg.anonKey) };
   }
 
   function getCloudCacheKey() {
@@ -1041,80 +1041,29 @@
   }
 
   async function signup() {
-    if (supabaseClient) {
-      const email = els.signupUser.value.trim();
-      const password = els.signupPass.value;
-      const password2 = els.signupPass2.value;
-      if (!email.includes("@")) return setAuthStatus("Use an email address for cloud sign up.", true);
-      if (password.length < 10) return setAuthStatus("Password must be at least 10 characters.", true);
-      if (password !== password2) return setAuthStatus("Passwords do not match.", true);
-      const { error } = await supabaseClient.auth.signUp({ email, password });
-      if (error) return setAuthStatus(error.message || "Could not create cloud account.", true);
-      setAuthView("login");
-      els.loginUser.value = email;
-      setAuthStatus("Cloud account created. Check email if confirmation is required.");
-      return;
-    }
-    const username = els.signupUser.value.trim();
+    if (!supabaseClient) return setAuthStatus("Cloud configuration is missing. Contact the app owner.", true);
+    const email = els.signupUser.value.trim();
     const password = els.signupPass.value;
     const password2 = els.signupPass2.value;
-    const authRecords = getAuthRecord() || {};
-    if (!username || username.length < 3) return setAuthStatus("Username must be at least 3 characters.", true);
-    if (authRecords[username]) return setAuthStatus("That username already exists on this device. Please login.", true);
+    if (!email.includes("@")) return setAuthStatus("Use an email address for cloud sign up.", true);
     if (password.length < 10) return setAuthStatus("Password must be at least 10 characters.", true);
     if (password !== password2) return setAuthStatus("Passwords do not match.", true);
-
-    const material = await deriveKeyMaterial(password);
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const authHash = await deriveAuth(material, salt, PBKDF2_ITERATIONS);
-    authRecords[username] = { username, salt: b64FromBytes(salt), pwdHash: b64FromBytes(authHash), iterations: PBKDF2_ITERATIONS };
-    saveAuthRecords(authRecords);
-    localStorage.removeItem(AUTH_KEY);
-    els.loginUser.value = username;
-    els.loginPass.value = "";
-    setAppTab("inventory");
-  setAuthView("login");
-    setAuthStatus("Account created. You can now login.");
+    const { error } = await supabaseClient.auth.signUp({ email, password });
+    if (error) return setAuthStatus(error.message || "Could not create cloud account.", true);
+    setAuthView("login");
+    els.loginUser.value = email;
+    setAuthStatus("Cloud account created. Check email if confirmation is required.");
   }
 
   async function login() {
-    if (supabaseClient) {
-      const email = els.loginUser.value.trim();
-      const password = els.loginPass.value;
-      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
-      if (error || !data?.user) return setAuthStatus(error?.message || "Invalid email or password.", true);
-      currentUser = data.user.email || data.user.id;
-      usingCloudAuth = true;
-      sessionKey = null;
-      const loaded = await load();
-      items = loaded.items;
-      recipes = loaded.recipes;
-      mealPlan = loaded.mealPlan;
-      shoppingListItems = loaded.shoppingListItems || [];
-      els.authWrap.classList.add("hidden");
-      els.app.classList.remove("hidden");
-      render();
-      await startCloudRealtime();
-      await loadHouseholdMembers();
-      return;
-    }
-    const records = getAuthRecord() || {};
-    if (!Object.keys(records).length) return setAuthStatus("No account found. Please sign up first.", true);
-
-    const username = els.loginUser.value.trim();
+    if (!supabaseClient) return setAuthStatus("Cloud configuration is missing. Contact the app owner.", true);
+    const email = els.loginUser.value.trim();
     const password = els.loginPass.value;
-    const rec = records[username];
-    if (!rec) return setAuthStatus("Invalid username or password.", true);
-
-    const material = await deriveKeyMaterial(password);
-    const salt = bytesFromB64(rec.salt);
-    const iterations = clampInt(rec.iterations || PBKDF2_ITERATIONS);
-    const tryHash = await deriveAuth(material, salt, iterations);
-    const savedHash = bytesFromB64(rec.pwdHash);
-    if (!timingSafeEqual(tryHash, savedHash)) return setAuthStatus("Invalid username or password.", true);
-
-    sessionKey = await deriveAesKey(material, salt, iterations);
-    currentUser = rec.username;
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error || !data?.user) return setAuthStatus(error?.message || "Invalid email or password.", true);
+    currentUser = data.user.email || data.user.id;
+    usingCloudAuth = true;
+    sessionKey = null;
     const loaded = await load();
     items = loaded.items;
     recipes = loaded.recipes;
@@ -1123,6 +1072,8 @@
     els.authWrap.classList.add("hidden");
     els.app.classList.remove("hidden");
     render();
+    await startCloudRealtime();
+    await loadHouseholdMembers();
   }
 
 
@@ -1143,7 +1094,7 @@
     els.app.classList.add("hidden");
     els.authWrap.classList.remove("hidden");
     setAuthView("login");
-    setAuthStatus(supabaseClient ? "Signed out." : "");
+    setAuthStatus("Signed out.");
     els.loginPass.value = "";
     if (els.membersList) els.membersList.innerHTML = "";
     setInviteStatus("");
@@ -1589,9 +1540,7 @@ function addRecipeFromForm() {
   els.closeImport.addEventListener("click", () => closeDialog(els.importDialog));
   els.doImport.addEventListener("click", () => { const res = importData(els.importText.value); if (!res) return; alert(res.msg); if (res.ok) closeDialog(els.importDialog); });
   els.wipe.addEventListener("click", () => {
-    const confirmMsg = usingCloudAuth
-      ? "Delete all inventory items for this household? This syncs to every connected device."
-      : "Delete all inventory items on this device?";
+    const confirmMsg = "Delete all inventory items for this household? This syncs to every connected device.";
     if (!confirm(confirmMsg)) return;
     items = [];
     render();
@@ -1616,6 +1565,8 @@ function addRecipeFromForm() {
   if (supabaseClient) {
     setAuthStatus("Cloud auth enabled. Use email + password.");
     restoreCloudSession().catch(() => {});
+  } else {
+    setAuthStatus("Cloud configuration missing in BUILT_IN_SUPABASE_CONFIG.", true);
   }
 })();
 </script>
