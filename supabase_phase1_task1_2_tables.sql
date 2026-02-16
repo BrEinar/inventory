@@ -285,7 +285,7 @@ create policy household_members_owner_delete
 -- Bootstrap helper: ensure signed-in user always has a household they own.
 -- Uses SECURITY DEFINER so initial owner membership can be created without
 -- requiring an existing owner row.
-create or replace function public.ensure_household_for_current_user()
+create or replace function public.ensure_household_for_current_user(desired_name text default null)
 returns uuid
 language plpgsql
 security definer
@@ -306,7 +306,7 @@ begin
   end if;
 
   insert into public.households(name)
-  values ('My household')
+  values (coalesce(nullif(trim(desired_name), ''), 'My household'))
   returning id into new_household;
 
   insert into public.household_members(household_id, user_id, role)
@@ -316,7 +316,7 @@ begin
 end;
 $$;
 
-grant execute on function public.ensure_household_for_current_user() to authenticated;
+grant execute on function public.ensure_household_for_current_user(text) to authenticated;
 
 -- Shared entity policies. Members can read, owner/editor can write.
 drop policy if exists inventory_items_select_member on public.inventory_items;

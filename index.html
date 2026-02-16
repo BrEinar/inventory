@@ -371,6 +371,14 @@
     <div class="card" style="margin-top:12px;">
       <h3 style="margin:0 0 8px;">👨‍👩‍👧 Household sharing</h3>
       <div class="row">
+        <label style="min-width:260px;">
+          Household name
+          <input id="householdName" placeholder="e.g. Smith Family" autocomplete="off" />
+        </label>
+        <button id="saveHouseholdNameBtn">Save name</button>
+      </div>
+      <div id="householdStatus" class="muted small" style="margin-top:8px;"></div>
+      <div class="row">
         <button id="createInviteBtn">Create invite code</button>
         <label>
           Invite code
@@ -487,6 +495,9 @@
     buildShoppingBtn: $("buildShoppingBtn"),
     shoppingList: $("shoppingList"),
     createInviteBtn: $("createInviteBtn"),
+    householdName: $("householdName"),
+    saveHouseholdNameBtn: $("saveHouseholdNameBtn"),
+    householdStatus: $("householdStatus"),
     inviteCode: $("inviteCode"),
     acceptInviteBtn: $("acceptInviteBtn"),
     inviteStatus: $("inviteStatus"),
@@ -657,6 +668,11 @@
     );
   }
 
+  function getDesiredHouseholdName() {
+    const candidate = String(els.householdName?.value || "").trim();
+    return candidate || null;
+  }
+
   function isUuid(value) {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || "").trim());
   }
@@ -688,7 +704,7 @@
       return cloudHouseholdId;
     }
 
-    const { data, error } = await supabaseClient.rpc("ensure_household_for_current_user", {});
+    const { data, error } = await supabaseClient.rpc("ensure_household_for_current_user", { desired_name: getDesiredHouseholdName() });
     if (error) {
       if (isMissingEnsureHouseholdMigration(error)) {
         throw new Error(MISSING_HOUSEHOLD_MIGRATION_MESSAGE);
@@ -792,6 +808,50 @@
     els.inviteStatus.style.color = isError ? "#ef4444" : "";
   }
 
+  function setHouseholdStatus(message, isError = false) {
+    if (!els.householdStatus) return;
+    els.householdStatus.textContent = message || "";
+    els.householdStatus.style.color = isError ? "#ef4444" : "";
+  }
+
+  async function loadHouseholdName() {
+    if (!usingCloudAuth || !supabaseClient || !els.householdName) return;
+    try {
+      const householdId = await ensureCloudHouseholdId();
+      if (!householdId) return;
+      const { data, error } = await supabaseClient
+        .from("households")
+        .select("name")
+        .eq("id", householdId)
+        .maybeSingle();
+      if (error) throw error;
+      els.householdName.value = String(data?.name || "");
+    } catch (e) {
+      setHouseholdStatus(`Could not load household name: ${e?.message || e}`, true);
+    }
+  }
+
+  async function saveHouseholdName() {
+    if (!usingCloudAuth || !supabaseClient || !els.householdName) return;
+    const name = String(els.householdName.value || "").trim();
+    if (!name) {
+      setHouseholdStatus("Enter a household name first.", true);
+      return;
+    }
+    try {
+      const householdId = await ensureCloudHouseholdId();
+      if (!householdId) return;
+      const { error } = await supabaseClient
+        .from("households")
+        .update({ name })
+        .eq("id", householdId);
+      if (error) throw error;
+      setHouseholdStatus("Household name saved.");
+    } catch (e) {
+      setHouseholdStatus(`Could not save household name: ${e?.message || e}`, true);
+    }
+  }
+
   async function loadHouseholdMembers() {
     if (!usingCloudAuth || !supabaseClient || !els.membersList) return;
     try {
@@ -799,10 +859,12 @@
       if (!householdId) return;
       const { data, error } = await supabaseClient
         .from("household_members")
-        .select("id,user_id,role")
+        .select("id,user_id,role,created_at")
         .eq("household_id", householdId)
         .order("created_at", { ascending: true });
       if (error) throw error;
+      const { data: authData } = await supabaseClient.auth.getUser();
+      const currentUserId = String(authData?.user?.id || "");
       els.membersList.innerHTML = "";
       const members = data || [];
       if (!members.length) {
@@ -812,7 +874,9 @@
       for (const m of members) {
         const row = document.createElement("div");
         row.className = "row";
-        row.innerHTML = `<div><code>${escapeHtml(m.user_id)}</code> <span class="pill">${escapeHtml(m.role)}</span></div>`;
+        const joinedOn = m.created_at ? new Date(m.created_at).toLocaleDateString() : "unknown";
+        const you = currentUserId && m.user_id === currentUserId ? " (you)" : "";
+        row.innerHTML = `<div><code>${escapeHtml(m.user_id)}</code>${escapeHtml(you)} <span class="pill">${escapeHtml(m.role)}</span><div class="muted small">Joined ${escapeHtml(joinedOn)}</div></div>`;
         els.membersList.appendChild(row);
       }
     } catch (e) {
@@ -1046,6 +1110,8 @@
     mealPlan = loaded.mealPlan;
     shoppingListItems = loaded.shoppingListItems || [];
     render();
+    await loadHouseholdName();
+    await loadHouseholdMembers();
   }
 
   async function restoreCloudSession() {
@@ -1064,6 +1130,7 @@
     els.app.classList.remove("hidden");
     render();
     await startCloudRealtime();
+    await loadHouseholdName();
     await loadHouseholdMembers();
     return true;
   }
@@ -1130,6 +1197,7 @@
     els.app.classList.remove("hidden");
     render();
     await startCloudRealtime();
+    await loadHouseholdName();
     await loadHouseholdMembers();
   }
 
@@ -1154,6 +1222,8 @@
     setAuthStatus("Signed out.");
     els.loginPass.value = "";
     if (els.membersList) els.membersList.innerHTML = "";
+    if (els.householdName) els.householdName.value = "";
+    setHouseholdStatus("");
     setInviteStatus("");
   }
 
@@ -1612,6 +1682,7 @@ function addRecipeFromForm() {
   els.buildShoppingBtn.addEventListener("click", buildShoppingList);
   els.createInviteBtn.addEventListener("click", () => createInviteCode().catch(() => setInviteStatus("Could not create invite code.", true)));
   els.acceptInviteBtn.addEventListener("click", () => acceptInviteCode().catch(() => setInviteStatus("Could not accept invite code.", true)));
+  els.saveHouseholdNameBtn.addEventListener("click", () => saveHouseholdName().catch(() => setHouseholdStatus("Could not save household name.", true)));
   els.recipeList.addEventListener("click", (e) => { const btn = e.target.closest("button[data-recipe-del]"); if (!btn) return; const id = btn.dataset.recipeDel; recipes = recipes.filter(r => r.id !== id); mealPlan.entries = mealPlan.entries.filter(x => x.recipeId !== id); render(); });
   els.planEntries.addEventListener("click", (e) => { const btn = e.target.closest("button[data-plan-del]"); if (!btn) return; const id = btn.dataset.planDel; mealPlan.entries = mealPlan.entries.filter(x => x.id !== id); render(); });
   [els.planStart, els.planDays].forEach(el => el.addEventListener("change", () => { mealPlan.start = els.planStart.value; mealPlan.days = Math.max(1, clampInt(els.planDays.value)); save().catch(() => {}); }));

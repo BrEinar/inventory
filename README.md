@@ -56,7 +56,8 @@ Then open: `http://localhost:8080`
 
 1. Sign up with **email + password**.
 2. Log in.
-3. Use **Create invite code** / **Join household** to share a household.
+3. Set a **Household name** in the sharing panel, then use **Create invite code** / **Join household** to share it.
+4. In the same panel, view household members and when they joined.
 
 All app data is cloud-backed and shared by household.
 
