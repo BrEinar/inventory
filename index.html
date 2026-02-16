@@ -1039,6 +1039,15 @@
     }
   }
 
+  async function refreshAfterStateLoad() {
+    const loaded = await load();
+    items = loaded.items;
+    recipes = loaded.recipes;
+    mealPlan = loaded.mealPlan;
+    shoppingListItems = loaded.shoppingListItems || [];
+    render();
+  }
+
   async function restoreCloudSession() {
     if (!supabaseClient) return false;
     const { data, error } = await supabaseClient.auth.getSession();
